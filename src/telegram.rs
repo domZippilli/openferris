@@ -1,63 +1,76 @@
-use anyhow::Result;
-use teloxide::prelude::*;
+use anyhow::{Context, Result};
+use serde::Deserialize;
 
 use crate::client;
 use crate::config::TelegramConfig;
 use crate::protocol::{DaemonRequest, RequestKind};
 
+const TELEGRAM_API: &str = "https://api.telegram.org";
+
 pub async fn run(daemon_address: String, tg_config: TelegramConfig) -> Result<()> {
-    let bot = Bot::new(&tg_config.bot_token);
+    let http = reqwest::Client::new();
+    let base_url = format!("{}/bot{}", TELEGRAM_API, tg_config.bot_token);
 
-    tracing::info!("Telegram bot starting...");
+    tracing::info!("Telegram bot starting (long polling)...");
 
-    let allowed_users = tg_config.allowed_users.clone();
+    let mut offset: i64 = 0;
 
-    let handler = Update::filter_message().endpoint(
-        move |bot: Bot, msg: Message, daemon_addr: String, allowed: Vec<u64>| async move {
-            handle_message(bot, msg, &daemon_addr, &allowed).await
-        },
-    );
+    loop {
+        let updates = match get_updates(&http, &base_url, offset).await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!("Failed to get updates: {:#}", e);
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
 
-    Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![daemon_address, allowed_users])
-        .default_handler(|_| async {})
-        .enable_ctrlc_handler()
-        .build()
-        .dispatch()
-        .await;
+        for update in updates {
+            offset = update.update_id + 1;
 
-    Ok(())
-}
+            let message = match update.message {
+                Some(m) => m,
+                None => continue,
+            };
 
-async fn handle_message(
-    bot: Bot,
-    msg: Message,
-    daemon_address: &str,
-    allowed_users: &[u64],
-) -> Result<(), teloxide::RequestError> {
-    let text = match msg.text() {
-        Some(t) => t,
-        None => return Ok(()), // Ignore non-text messages
-    };
+            let text = match &message.text {
+                Some(t) => t.clone(),
+                None => continue,
+            };
 
-    // Check user allowlist
-    if !allowed_users.is_empty() {
-        let user_id = msg.from.as_ref().map(|u| u.id.0).unwrap_or(0);
-        if !allowed_users.contains(&user_id) {
-            tracing::warn!("Telegram message from unauthorized user {}", user_id);
-            return Ok(());
+            let chat_id = message.chat.id;
+            let user_id = message.from.as_ref().map(|u| u.id).unwrap_or(0);
+
+            // Check user allowlist
+            if !tg_config.allowed_users.is_empty() && !tg_config.allowed_users.contains(&user_id)
+            {
+                tracing::warn!("Telegram message from unauthorized user {}", user_id);
+                continue;
+            }
+
+            tracing::info!("Telegram message from {}: {}", user_id, text);
+
+            // Show "typing..." indicator while processing
+            let _ = send_chat_action(&http, &base_url, chat_id, "typing").await;
+
+            let response = handle_message(&text, &daemon_address).await;
+
+            // Telegram has a 4096 char message limit
+            for chunk in chunk_message(&response, 4096) {
+                if let Err(e) = send_message(&http, &base_url, chat_id, chunk).await {
+                    tracing::error!("Failed to send message: {:#}", e);
+                }
+            }
         }
     }
+}
 
-    tracing::info!("Telegram message from {:?}: {}", msg.from.as_ref().map(|u| u.id), text);
-
+async fn handle_message(text: &str, daemon_address: &str) -> String {
     // Handle /remember command
     let request = if let Some(fact) = text.strip_prefix("/remember ") {
         let fact = fact.trim();
         if fact.is_empty() {
-            bot.send_message(msg.chat.id, "Usage: /remember <fact to remember>")
-                .await?;
-            return Ok(());
+            return "Usage: /remember <fact to remember>".to_string();
         }
         DaemonRequest {
             id: uuid::Uuid::new_v4().to_string(),
@@ -76,15 +89,100 @@ async fn handle_message(
         }
     };
 
-    let response = match client::send_request(daemon_address, &request).await {
+    match client::send_request(daemon_address, &request).await {
         Ok(text) => text,
         Err(e) => format!("Error: {:#}", e),
-    };
-
-    // Telegram has a 4096 char message limit
-    for chunk in chunk_message(&response, 4096) {
-        bot.send_message(msg.chat.id, chunk).await?;
     }
+}
+
+// --- Telegram Bot API types (only what we need) ---
+
+#[derive(Deserialize)]
+struct TgResponse<T> {
+    #[allow(dead_code)]
+    ok: bool,
+    result: Option<T>,
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TgUpdate {
+    update_id: i64,
+    message: Option<TgMessage>,
+}
+
+#[derive(Deserialize)]
+struct TgMessage {
+    chat: TgChat,
+    from: Option<TgUser>,
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TgChat {
+    id: i64,
+}
+
+#[derive(Deserialize)]
+struct TgUser {
+    id: u64,
+}
+
+// --- Telegram Bot API calls ---
+
+async fn get_updates(
+    http: &reqwest::Client,
+    base_url: &str,
+    offset: i64,
+) -> Result<Vec<TgUpdate>> {
+    let resp: TgResponse<Vec<TgUpdate>> = http
+        .get(format!("{}/getUpdates", base_url))
+        .query(&[
+            ("offset", offset.to_string()),
+            ("timeout", "30".to_string()),
+        ])
+        .send()
+        .await
+        .context("Telegram API request failed")?
+        .json()
+        .await
+        .context("Failed to parse Telegram response")?;
+
+    resp.result
+        .ok_or_else(|| anyhow::anyhow!("Telegram API error: {}", resp.description.unwrap_or_default()))
+}
+
+async fn send_chat_action(
+    http: &reqwest::Client,
+    base_url: &str,
+    chat_id: i64,
+    action: &str,
+) -> Result<()> {
+    http.post(format!("{}/sendChatAction", base_url))
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "action": action,
+        }))
+        .send()
+        .await
+        .context("Failed to send chat action")?;
+    Ok(())
+}
+
+async fn send_message(
+    http: &reqwest::Client,
+    base_url: &str,
+    chat_id: i64,
+    text: &str,
+) -> Result<()> {
+    http.post(format!("{}/sendMessage", base_url))
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+        }))
+        .send()
+        .await
+        .context("Failed to send Telegram message")?;
 
     Ok(())
 }
