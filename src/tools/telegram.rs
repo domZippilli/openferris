@@ -25,8 +25,10 @@ impl Tool for SendTelegramTool {
 
     fn description_for_llm(&self) -> &str {
         "Send a message via Telegram. \
-         Parameters: {\"message\": \"<text>\", \"chat_id\": <optional number>}. \
+         Parameters: {\"message\": \"<text>\", \"parse_mode\": \"<optional: MarkdownV2 or HTML>\", \"chat_id\": <optional number>}. \
          If chat_id is omitted, the message is sent to the default configured chat. \
+         parse_mode enables formatting: use \"MarkdownV2\" for *bold*, _italic_, `code`, ```code blocks```, \
+         or \"HTML\" for <b>bold</b>, <i>italic</i>, <code>code</code>. If omitted, plain text is sent. \
          Use this to deliver results, notifications, or replies to the user via Telegram."
     }
 
@@ -46,6 +48,11 @@ impl Tool for SendTelegramTool {
                 )
             })?;
 
+        let parse_mode = params
+            .get("parse_mode")
+            .and_then(|v| v.as_str())
+            .filter(|m| *m == "MarkdownV2" || *m == "HTML");
+
         let base_url = format!("https://api.telegram.org/bot{}", self.bot_token);
 
         let client = reqwest::Client::new();
@@ -54,12 +61,17 @@ impl Tool for SendTelegramTool {
         let chunks = chunk_message(message, 4096);
 
         for chunk in &chunks {
+            let mut body = serde_json::json!({
+                "chat_id": chat_id,
+                "text": chunk,
+            });
+            if let Some(mode) = parse_mode {
+                body["parse_mode"] = serde_json::json!(mode);
+            }
+
             let resp = client
                 .post(format!("{}/sendMessage", base_url))
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "text": chunk,
-                }))
+                .json(&body)
                 .send()
                 .await?;
 
