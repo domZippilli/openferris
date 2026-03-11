@@ -167,7 +167,7 @@ Prepare a morning briefing for your human. Include:
 
 The `tools` field is the **tool sieve** — it declares which tools this skill is allowed to use. The agent loop enforces this: if the LLM tries to call a tool not in the list, the call is rejected.
 
-**Bundled skills:** `triage` (freeform conversation) and `daily-briefing`.
+**Bundled skills:** `default` (freeform conversation) and `daily-briefing`.
 
 **Custom skills:** Place them in `~/.config/openferris/skills/<skill-name>/SKILL.md`. User skills override bundled ones with the same name.
 

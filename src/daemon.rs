@@ -288,7 +288,7 @@ async fn process_request(
             }
         }
         RequestKind::FreeformMessage { text } => {
-            match skills::load_skill("triage", user_skills_dir) {
+            match skills::load_skill("default", user_skills_dir) {
                 Ok(skill) => {
                     match agent
                         .run(&skill, text, &queued.session_history, identity, user_profile, persistent_context)
