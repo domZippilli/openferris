@@ -62,7 +62,7 @@ impl Agent {
             if tool_calls.is_empty() {
                 // Final answer — extract memories and strip tags
                 let memories = parse_memories(&response);
-                let clean_response = strip_memory_tags(&response);
+                let clean_response = strip_tags(&response);
                 return Ok(AgentResult {
                     response: clean_response,
                     memories,
@@ -179,19 +179,26 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
         if let Some(rel_end) = text[after_tag..].find("</tool_call>") {
             let inner = text[after_tag..after_tag + rel_end].trim();
 
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(inner) {
-                let name = parsed
-                    .get("tool")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let params = parsed
-                    .get("params")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
+            match serde_json::from_str::<serde_json::Value>(inner) {
+                Ok(parsed) => {
+                    let name = parsed
+                        .get("tool")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let params = parsed
+                        .get("params")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
 
-                if !name.is_empty() {
-                    calls.push(ToolCall { name, params });
+                    if !name.is_empty() {
+                        calls.push(ToolCall { name, params });
+                    } else {
+                        tracing::warn!("Tool call block has no 'tool' field: {}", inner);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse tool call JSON: {} — raw: {}", e, inner);
                 }
             }
 
@@ -227,14 +234,16 @@ fn parse_memories(text: &str) -> Vec<String> {
     memories
 }
 
-fn strip_memory_tags(text: &str) -> String {
+fn strip_tags(text: &str) -> String {
     let mut result = text.to_string();
-    while let Some(start) = result.find("<memory>") {
-        if let Some(end_tag) = result[start..].find("</memory>") {
-            let end = start + end_tag + "</memory>".len();
-            result = format!("{}{}", &result[..start], &result[end..]);
-        } else {
-            break;
+    for (open, close) in [("<memory>", "</memory>"), ("<tool_call>", "</tool_call>")] {
+        while let Some(start) = result.find(open) {
+            if let Some(end_tag) = result[start..].find(close) {
+                let end = start + end_tag + close.len();
+                result = format!("{}{}", &result[..start], &result[end..]);
+            } else {
+                break;
+            }
         }
     }
     // Clean up extra blank lines left behind
@@ -302,10 +311,10 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_memory_tags() {
+    fn test_strip_tags() {
         let text =
             "Sure, I'll remember that.\n\n<memory>Safety word is banana</memory>\n\nAnything else?";
-        let stripped = strip_memory_tags(text);
+        let stripped = strip_tags(text);
         assert_eq!(stripped, "Sure, I'll remember that.\n\nAnything else?");
         assert!(!stripped.contains("<memory>"));
     }
@@ -314,6 +323,6 @@ mod tests {
     fn test_no_memories() {
         let text = "Just a normal response.";
         assert!(parse_memories(text).is_empty());
-        assert_eq!(strip_memory_tags(text), "Just a normal response.");
+        assert_eq!(strip_tags(text), "Just a normal response.");
     }
 }

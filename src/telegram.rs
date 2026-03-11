@@ -48,7 +48,7 @@ pub async fn run(daemon_address: String, tg_config: TelegramConfig) -> Result<()
                 continue;
             }
 
-            tracing::info!("Telegram message from {}: {}", user_id, text);
+            tracing::info!("Telegram message from user {}", user_id);
 
             // Show "typing..." indicator while processing
             let _ = send_chat_action(&http, &base_url, chat_id, "typing").await;
