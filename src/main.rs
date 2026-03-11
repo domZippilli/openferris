@@ -69,6 +69,15 @@ async fn main() -> Result<()> {
 
             let mem_path = memories::Memories::default_path();
             let mems = memories::Memories::new(mem_path.clone());
+
+            // Seed the workspace skills README so the agent knows the format
+            let workspace_skills_dir = config::data_dir().join("workspace").join("skills");
+            let skills_readme = workspace_skills_dir.join("README.md");
+            if !skills_readme.exists() {
+                std::fs::create_dir_all(&workspace_skills_dir)?;
+                std::fs::write(&skills_readme, include_str!("../skills/README.md"))?;
+                tracing::info!("Seeded skills README at {}", skills_readme.display());
+            }
             tracing::info!("Memories at {}", mem_path.display());
 
             daemon::run(config, agent, storage, mems).await?;
