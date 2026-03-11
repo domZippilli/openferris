@@ -77,13 +77,20 @@ impl Agent {
 
             // Execute each tool call and feed results back
             for call in &tool_calls {
+                tracing::info!("Tool call: {}", call.name);
                 let result = match self
                     .tools
                     .execute(&call.name, call.params.clone(), &skill.tools)
                     .await
                 {
-                    Ok(output) => output,
-                    Err(e) => format!("Error: {}", e),
+                    Ok(output) => {
+                        tracing::info!("Tool result: {} ok ({} bytes)", call.name, output.len());
+                        output
+                    }
+                    Err(e) => {
+                        tracing::warn!("Tool error: {} — {}", call.name, e);
+                        format!("Error: {}", e)
+                    }
                 };
 
                 messages.push(ChatMessage {
