@@ -42,6 +42,7 @@ pub async fn run(address: &str) -> Result<()> {
             kind: RequestKind::FreeformMessage {
                 text: input.to_string(),
             },
+            source: Some("tui".to_string()),
         };
 
         let mut data = serde_json::to_string(&request)?;

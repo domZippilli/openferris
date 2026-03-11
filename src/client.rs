@@ -10,6 +10,7 @@ pub async fn send_skill(address: &str, skill_name: &str) -> Result<String> {
         kind: RequestKind::RunSkill {
             skill_name: skill_name.to_string(),
         },
+        source: Some("cli".to_string()),
     };
     send_request(address, &request).await
 }

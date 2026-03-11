@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 pub struct DaemonRequest {
     pub id: String,
     pub kind: RequestKind,
+    /// Where this request originated from (e.g., "tui", "cli", "telegram").
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -5,6 +5,7 @@ mod daemon;
 mod llm;
 mod protocol;
 mod skills;
+mod storage;
 mod tools;
 mod tui;
 
@@ -49,7 +50,11 @@ async fn main() -> Result<()> {
 
             let agent = agent::Agent::new(llm_backend, tool_registry, soul);
 
-            daemon::run(config, agent).await?;
+            let db_path = config::data_dir().join("openferris.db");
+            let storage = storage::Storage::open(&db_path)?;
+            tracing::info!("Storage opened at {}", db_path.display());
+
+            daemon::run(config, agent, storage).await?;
         }
         Commands::Tui => {
             tui::run(&config.daemon.listen).await?;

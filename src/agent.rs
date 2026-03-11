@@ -6,6 +6,14 @@ use crate::tools::ToolRegistry;
 
 const MAX_ITERATIONS: usize = 20;
 
+#[derive(Clone)]
+pub struct AgentResult {
+    /// The response text to show the user (memory tags stripped).
+    pub response: String,
+    /// Facts the agent decided to remember.
+    pub memories: Vec<String>,
+}
+
 pub struct Agent {
     llm: Box<dyn LlmBackend>,
     tools: ToolRegistry,
@@ -17,15 +25,17 @@ impl Agent {
         Self { llm, tools, soul }
     }
 
-    /// Run the agent loop for a skill with an optional user message.
+    /// Run the agent loop for a skill with a user message.
     /// `history` contains prior conversation messages (for TUI sessions).
+    /// `persistent_context` is loaded from storage (memories + recent interactions).
     pub async fn run(
         &self,
         skill: &Skill,
         user_message: &str,
         history: &[ChatMessage],
-    ) -> Result<String> {
-        let system_prompt = self.build_system_prompt(skill);
+        persistent_context: &str,
+    ) -> Result<AgentResult> {
+        let system_prompt = self.build_system_prompt(skill, persistent_context);
 
         let mut messages = vec![ChatMessage {
             role: Role::System,
@@ -48,8 +58,13 @@ impl Agent {
             let tool_calls = parse_tool_calls(&response);
 
             if tool_calls.is_empty() {
-                // No tool calls — this is the final answer
-                return Ok(response);
+                // Final answer — extract memories and strip tags
+                let memories = parse_memories(&response);
+                let clean_response = strip_memory_tags(&response);
+                return Ok(AgentResult {
+                    response: clean_response,
+                    memories,
+                });
             }
 
             // Add the assistant's response (with tool call markers) to history
@@ -82,7 +97,7 @@ impl Agent {
         anyhow::bail!("Agent exceeded maximum iterations ({})", MAX_ITERATIONS)
     }
 
-    fn build_system_prompt(&self, skill: &Skill) -> String {
+    fn build_system_prompt(&self, skill: &Skill, persistent_context: &str) -> String {
         let tool_descriptions = self.tools.get_descriptions(&skill.tools);
 
         let mut prompt = String::new();
@@ -90,6 +105,12 @@ impl Agent {
         // SOUL
         prompt.push_str(&self.soul);
         prompt.push_str("\n\n");
+
+        // Persistent context (memories + recent interactions from storage)
+        if !persistent_context.is_empty() {
+            prompt.push_str(persistent_context);
+            prompt.push('\n');
+        }
 
         // Skill instructions
         prompt.push_str("# Current Task\n\n");
@@ -111,8 +132,15 @@ impl Agent {
             prompt.push_str("{\"tool\": \"tool_name\", \"params\": {}}\n");
             prompt.push_str("</tool_call>\n\n");
             prompt.push_str("The system will execute the tool and return the result in a <tool_result> block.\n");
-            prompt.push_str("You may call tools multiple times. When you have all the information you need, respond with your final answer without any <tool_call> blocks.\n");
+            prompt.push_str("You may call tools multiple times. When you have all the information you need, respond with your final answer without any <tool_call> blocks.\n\n");
         }
+
+        // Memory instructions
+        prompt.push_str("# Memory\n\n");
+        prompt.push_str("When the user tells you something worth remembering across conversations — preferences, names, important facts, standing instructions — save it with a <memory> tag:\n\n");
+        prompt.push_str("<memory>The user's name is Alex</memory>\n\n");
+        prompt.push_str("Only save genuinely important, durable facts. Don't save transient details or task-specific information.\n");
+        prompt.push_str("Your saved memories persist across all interfaces (TUI, Telegram, etc.) and all future interactions.\n");
 
         prompt
     }
@@ -162,6 +190,46 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
     calls
 }
 
+// --- Memory tag parser ---
+
+fn parse_memories(text: &str) -> Vec<String> {
+    let mut memories = vec![];
+    let mut search_from = 0;
+
+    while let Some(rel_start) = text[search_from..].find("<memory>") {
+        let after_tag = search_from + rel_start + "<memory>".len();
+
+        if let Some(rel_end) = text[after_tag..].find("</memory>") {
+            let content = text[after_tag..after_tag + rel_end].trim();
+            if !content.is_empty() {
+                memories.push(content.to_string());
+            }
+            search_from = after_tag + rel_end + "</memory>".len();
+        } else {
+            break;
+        }
+    }
+
+    memories
+}
+
+fn strip_memory_tags(text: &str) -> String {
+    let mut result = text.to_string();
+    while let Some(start) = result.find("<memory>") {
+        if let Some(end_tag) = result[start..].find("</memory>") {
+            let end = start + end_tag + "</memory>".len();
+            result = format!("{}{}", &result[..start], &result[end..]);
+        } else {
+            break;
+        }
+    }
+    // Clean up extra blank lines left behind
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+    result.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +267,39 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "datetime");
         assert_eq!(calls[1].name, "weather");
+    }
+
+    #[test]
+    fn test_parse_memories() {
+        let text =
+            "Sure, I'll remember that.\n\n<memory>Safety word is banana</memory>\n\nAnything else?";
+        let memories = parse_memories(text);
+        assert_eq!(memories, vec!["Safety word is banana"]);
+    }
+
+    #[test]
+    fn test_parse_multiple_memories() {
+        let text =
+            "<memory>User's name is Alex</memory>\n<memory>Prefers dark mode</memory>\nGot it!";
+        let memories = parse_memories(text);
+        assert_eq!(memories.len(), 2);
+        assert_eq!(memories[0], "User's name is Alex");
+        assert_eq!(memories[1], "Prefers dark mode");
+    }
+
+    #[test]
+    fn test_strip_memory_tags() {
+        let text =
+            "Sure, I'll remember that.\n\n<memory>Safety word is banana</memory>\n\nAnything else?";
+        let stripped = strip_memory_tags(text);
+        assert_eq!(stripped, "Sure, I'll remember that.\n\nAnything else?");
+        assert!(!stripped.contains("<memory>"));
+    }
+
+    #[test]
+    fn test_no_memories() {
+        let text = "Just a normal response.";
+        assert!(parse_memories(text).is_empty());
+        assert_eq!(strip_memory_tags(text), "Just a normal response.");
     }
 }
