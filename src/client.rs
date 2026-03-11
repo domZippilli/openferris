@@ -15,7 +15,7 @@ pub async fn send_skill(address: &str, skill_name: &str) -> Result<String> {
     send_request(address, &request).await
 }
 
-async fn send_request(address: &str, request: &DaemonRequest) -> Result<String> {
+pub async fn send_request(address: &str, request: &DaemonRequest) -> Result<String> {
     let stream = TcpStream::connect(address)
         .await
         .context("Failed to connect to daemon. Is it running? Start with: openferris daemon")?;

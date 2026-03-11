@@ -8,6 +8,7 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    pub telegram: Option<TelegramConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +46,14 @@ impl Default for DaemonConfig {
             listen: default_listen(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TelegramConfig {
+    pub bot_token: String,
+    /// Telegram user IDs allowed to use the bot. If empty, anyone can use it.
+    #[serde(default)]
+    pub allowed_users: Vec<u64>,
 }
 
 fn default_listen() -> String {

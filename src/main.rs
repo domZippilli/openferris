@@ -7,6 +7,7 @@ mod memories;
 mod protocol;
 mod skills;
 mod storage;
+mod telegram;
 mod tools;
 mod tui;
 
@@ -31,6 +32,8 @@ enum Commands {
         /// Skill name to execute
         skill_name: String,
     },
+    /// Start the Telegram bot listener
+    Telegram,
     /// Clear interaction history and/or memories
     Forget {
         /// Time window to clear: "1h", "24h", "7d", "30d", or "all"
@@ -72,6 +75,13 @@ async fn main() -> Result<()> {
         }
         Commands::Tui => {
             tui::run(&config.daemon.listen).await?;
+        }
+        Commands::Telegram => {
+            let tg_config = config
+                .telegram
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("No [telegram] section in config.toml. Add bot_token to enable."))?;
+            telegram::run(config.daemon.listen.clone(), tg_config).await?;
         }
         Commands::Run { skill_name } => {
             let result = client::send_skill(&config.daemon.listen, &skill_name).await?;
