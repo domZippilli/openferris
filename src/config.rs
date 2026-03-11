@@ -11,6 +11,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub files: FilesConfig,
     pub telegram: Option<TelegramConfig>,
+    pub gmail: Option<GmailConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +59,27 @@ pub struct TelegramConfig {
     pub allowed_users: Vec<u64>,
     /// Default chat ID for outbound messages (e.g., skill-initiated notifications).
     pub default_chat_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GmailConfig {
+    /// Email addresses allowed to trigger auto-replies.
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+    /// Poll interval in seconds (default 60).
+    #[serde(default = "default_gmail_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Seconds between replies to the same thread (default 300).
+    #[serde(default = "default_gmail_rate_limit")]
+    pub rate_limit_secs: u64,
+}
+
+fn default_gmail_poll_interval() -> u64 {
+    60
+}
+
+fn default_gmail_rate_limit() -> u64 {
+    300
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]

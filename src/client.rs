@@ -9,6 +9,7 @@ pub async fn send_skill(address: &str, skill_name: &str) -> Result<String> {
         id: uuid::Uuid::new_v4().to_string(),
         kind: RequestKind::RunSkill {
             skill_name: skill_name.to_string(),
+            context: None,
         },
         source: Some("cli".to_string()),
     };

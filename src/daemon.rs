@@ -245,10 +245,13 @@ async fn process_request(
         .unwrap_or_else(|| "unknown".to_string());
 
     match &queued.request.kind {
-        RequestKind::RunSkill { skill_name } => {
+        RequestKind::RunSkill { skill_name, context } => {
             match skills::load_skill(skill_name, user_skills_dir) {
                 Ok(skill) => {
-                    let msg = format!("Execute the {} skill now.", skill_name);
+                    let msg = match context {
+                        Some(ctx) => format!("Execute the {} skill now.\n\n{}", skill_name, ctx),
+                        None => format!("Execute the {} skill now.", skill_name),
+                    };
                     match agent.run(&skill, &msg, &[], identity, user_profile, persistent_context).await {
                         Ok(result) => {
                             let log = LogData {

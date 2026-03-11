@@ -2,6 +2,7 @@ mod agent;
 mod client;
 mod config;
 mod daemon;
+mod gmail;
 mod llm;
 mod memories;
 mod protocol;
@@ -53,6 +54,8 @@ enum Commands {
     },
     /// Start the Telegram bot listener
     Telegram,
+    /// Start the Gmail listener
+    Gmail,
     /// Manage scheduled skill invocations via cron
     #[command(subcommand)]
     Schedule(ScheduleCommand),
@@ -113,6 +116,17 @@ async fn main() -> Result<()> {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("No [telegram] section in config.toml. Add bot_token to enable."))?;
             telegram::run(config.daemon.listen.clone(), tg_config).await?;
+        }
+        Commands::Gmail => {
+            let gmail_config = config
+                .gmail
+                .clone()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No [gmail] section in config.toml. Add allowed_senders to enable."
+                    )
+                })?;
+            gmail::run(config.daemon.listen.clone(), gmail_config).await?;
         }
         Commands::Run { skill_name } => {
             let result = client::send_skill(&config.daemon.listen, &skill_name).await?;

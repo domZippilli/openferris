@@ -11,7 +11,11 @@ pub struct DaemonRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestKind {
-    RunSkill { skill_name: String },
+    RunSkill {
+        skill_name: String,
+        #[serde(default)]
+        context: Option<String>,
+    },
     FreeformMessage { text: String },
     StoreMemory { content: String },
 }
