@@ -1,10 +1,11 @@
 pub mod datetime;
+pub mod files;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::config::AppConfig;
+use crate::config::{self, AppConfig};
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -62,5 +63,10 @@ impl ToolRegistry {
         self.register(Box::new(datetime::DateTimeTool::new(
             config.user.timezone.clone(),
         )));
+
+        let allowed_dirs = config::allowed_directories(&config.files);
+        self.register(Box::new(files::ReadFileTool::new(allowed_dirs.clone())));
+        self.register(Box::new(files::WriteFileTool::new(allowed_dirs.clone())));
+        self.register(Box::new(files::ListDirTool::new(allowed_dirs)));
     }
 }

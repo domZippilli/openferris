@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub files: FilesConfig,
     pub telegram: Option<TelegramConfig>,
 }
 
@@ -54,6 +56,32 @@ pub struct TelegramConfig {
     /// Telegram user IDs allowed to use the bot. If empty, anyone can use it.
     #[serde(default)]
     pub allowed_users: Vec<u64>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct FilesConfig {
+    /// Extra directories the agent is allowed to read/write.
+    /// The workspace directory (~/.local/share/openferris/workspace/) is always allowed.
+    #[serde(default)]
+    pub allowed_directories: Vec<String>,
+}
+
+/// Returns the list of directories the agent may read/write,
+/// always including the default workspace.
+pub fn allowed_directories(config: &FilesConfig) -> Vec<PathBuf> {
+    let mut dirs = vec![data_dir().join("workspace")];
+    for dir in &config.allowed_directories {
+        // Expand ~ to home directory
+        let expanded = if let Some(rest) = dir.strip_prefix("~/") {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(rest)
+        } else {
+            PathBuf::from(dir)
+        };
+        dirs.push(expanded);
+    }
+    dirs
 }
 
 fn default_listen() -> String {
