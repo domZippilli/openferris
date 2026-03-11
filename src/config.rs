@@ -56,6 +56,8 @@ pub struct TelegramConfig {
     /// Telegram user IDs allowed to use the bot. If empty, anyone can use it.
     #[serde(default)]
     pub allowed_users: Vec<u64>,
+    /// Default chat ID for outbound messages (e.g., skill-initiated notifications).
+    pub default_chat_id: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]

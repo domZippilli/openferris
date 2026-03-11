@@ -3,6 +3,7 @@ name: daily-briefing
 description: Morning briefing with date, time, and a motivational note
 tools:
   - datetime
+  - send_telegram
 ---
 
 Prepare a morning briefing for your human. Include:
@@ -12,3 +13,4 @@ Prepare a morning briefing for your human. Include:
 3. **Motivational note** — A brief, genuine encouragement to start the day.
 
 Keep it concise and friendly. This runs every morning via cron.
+After composing the briefing, deliver it via send_telegram.

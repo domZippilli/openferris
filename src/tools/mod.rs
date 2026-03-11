@@ -1,6 +1,7 @@
 pub mod datetime;
 pub mod files;
 pub mod schedule;
+pub mod telegram;
 pub mod web;
 
 use anyhow::Result;
@@ -72,5 +73,12 @@ impl ToolRegistry {
         self.register(Box::new(files::ListDirTool::new(allowed_dirs)));
         self.register(Box::new(web::FetchUrlTool));
         self.register(Box::new(schedule::ScheduleTool));
+
+        if let Some(ref tg) = config.telegram {
+            self.register(Box::new(telegram::SendTelegramTool::new(
+                tg.bot_token.clone(),
+                tg.default_chat_id,
+            )));
+        }
     }
 }

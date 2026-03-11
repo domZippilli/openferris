@@ -8,6 +8,7 @@ tools:
   - list_dir
   - fetch_url
   - schedule
+  - send_telegram
 ---
 
 You received a message from your human. Help them with whatever they need.
