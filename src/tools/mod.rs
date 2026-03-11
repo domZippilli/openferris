@@ -1,5 +1,6 @@
 pub mod datetime;
 pub mod files;
+pub mod schedule;
 pub mod web;
 
 use anyhow::Result;
@@ -70,5 +71,6 @@ impl ToolRegistry {
         self.register(Box::new(files::WriteFileTool::new(allowed_dirs.clone())));
         self.register(Box::new(files::ListDirTool::new(allowed_dirs)));
         self.register(Box::new(web::FetchUrlTool));
+        self.register(Box::new(schedule::ScheduleTool));
     }
 }

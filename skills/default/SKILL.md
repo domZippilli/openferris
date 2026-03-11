@@ -7,6 +7,7 @@ tools:
   - write_file
   - list_dir
   - fetch_url
+  - schedule
 ---
 
 You received a message from your human. Help them with whatever they need.
