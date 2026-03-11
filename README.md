@@ -23,6 +23,12 @@ The binary is at `target/release/openferris`. Copy it somewhere on your `$PATH`:
 cp target/release/openferris ~/.local/bin/
 ```
 
+or symlink it:
+
+```bash
+ln -s ~/openferris/target/release/openferris ~/.local/bin/openferris
+```
+
 ## Configure
 
 Create the config file:

@@ -15,6 +15,9 @@ pub struct LlamaCppBackend {
 struct ChatRequest {
     model: String,
     messages: Vec<ApiMessage>,
+    /// Pin to a specific llama.cpp slot for KV cache reuse across requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id_slot: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -62,6 +65,7 @@ impl LlmBackend for LlamaCppBackend {
         let request = ChatRequest {
             model: self.model.clone().unwrap_or_else(|| "default".to_string()),
             messages: api_messages,
+            id_slot: Some(0),
         };
 
         let url = format!(
