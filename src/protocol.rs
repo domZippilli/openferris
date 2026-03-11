@@ -13,6 +13,7 @@ pub struct DaemonRequest {
 pub enum RequestKind {
     RunSkill { skill_name: String },
     FreeformMessage { text: String },
+    StoreMemory { content: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

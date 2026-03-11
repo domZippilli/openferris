@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod daemon;
 mod llm;
+mod memories;
 mod protocol;
 mod skills;
 mod storage;
@@ -30,6 +31,15 @@ enum Commands {
         /// Skill name to execute
         skill_name: String,
     },
+    /// Clear interaction history and/or memories
+    Forget {
+        /// Time window to clear: "1h", "24h", "7d", "30d", or "all"
+        #[arg(default_value = "all")]
+        window: String,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -54,7 +64,11 @@ async fn main() -> Result<()> {
             let storage = storage::Storage::open(&db_path)?;
             tracing::info!("Storage opened at {}", db_path.display());
 
-            daemon::run(config, agent, storage).await?;
+            let mem_path = memories::Memories::default_path();
+            let mems = memories::Memories::new(mem_path.clone());
+            tracing::info!("Memories at {}", mem_path.display());
+
+            daemon::run(config, agent, storage, mems).await?;
         }
         Commands::Tui => {
             tui::run(&config.daemon.listen).await?;
@@ -63,9 +77,116 @@ async fn main() -> Result<()> {
             let result = client::send_skill(&config.daemon.listen, &skill_name).await?;
             println!("{}", result);
         }
+        Commands::Forget { window, yes } => {
+            forget_command(&window, yes)?;
+        }
     }
 
     Ok(())
+}
+
+fn forget_command(window: &str, skip_confirm: bool) -> Result<()> {
+    let db_path = config::data_dir().join("openferris.db");
+    let mems = memories::Memories::new(memories::Memories::default_path());
+
+    let since = parse_time_window(window)?;
+
+    // Count interactions from SQLite
+    let interactions = if db_path.exists() {
+        let store = storage::Storage::open(&db_path)?;
+        store.count_interactions(since.as_deref())?
+    } else {
+        0
+    };
+
+    // Count memories from markdown file
+    let memory_count = match &since {
+        Some(ts) => mems.count_since(ts)?,
+        None => mems.count()?,
+    };
+
+    if interactions == 0 && memory_count == 0 {
+        println!("Nothing to forget in that time window.");
+        return Ok(());
+    }
+
+    let window_label = if since.is_some() {
+        format!("the last {}", window)
+    } else {
+        "all time".to_string()
+    };
+
+    println!(
+        "This will delete from {}:\n  {} interactions\n  {} memories",
+        window_label, interactions, memory_count
+    );
+
+    if !skip_confirm {
+        eprint!("\nProceed? [y/N] ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Delete interactions from SQLite
+    let del_i = if db_path.exists() && interactions > 0 {
+        let store = storage::Storage::open(&db_path)?;
+        store.delete_interactions(since.as_deref())?
+    } else {
+        0
+    };
+
+    // Delete memories from markdown file
+    let del_m = match &since {
+        Some(ts) => mems.delete_since(ts)?,
+        None => mems.delete_all()?,
+    };
+
+    println!("Deleted {} interactions and {} memories.", del_i, del_m);
+
+    Ok(())
+}
+
+/// Parse a human-friendly time window into a SQLite datetime string.
+/// Returns None for "all" (meaning delete everything).
+fn parse_time_window(window: &str) -> Result<Option<String>> {
+    if window == "all" {
+        return Ok(None);
+    }
+
+    let (num_str, unit) = if let Some(s) = window.strip_suffix('h') {
+        (s, "hours")
+    } else if let Some(s) = window.strip_suffix('d') {
+        (s, "days")
+    } else if let Some(s) = window.strip_suffix('m') {
+        (s, "minutes")
+    } else {
+        anyhow::bail!(
+            "Invalid time window '{}'. Use format like: 1h, 24h, 7d, 30d, or all",
+            window
+        );
+    };
+
+    let num: i64 = num_str.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid time window '{}'. Use format like: 1h, 24h, 7d, 30d, or all",
+            window
+        )
+    })?;
+
+    // Compute the cutoff time using chrono (local time to match our storage)
+    let now = chrono::Local::now();
+    let cutoff = match unit {
+        "minutes" => now - chrono::Duration::minutes(num),
+        "hours" => now - chrono::Duration::hours(num),
+        "days" => now - chrono::Duration::days(num),
+        _ => unreachable!(),
+    };
+
+    Ok(Some(cutoff.format("%Y-%m-%d %H:%M:%S").to_string()))
 }
 
 fn create_llm_backend(config: &config::AppConfig) -> Box<dyn llm::LlmBackend> {

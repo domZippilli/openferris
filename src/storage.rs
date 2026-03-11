@@ -26,21 +26,19 @@ impl Storage {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS interactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                timestamp TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
                 source TEXT NOT NULL DEFAULT 'unknown',
                 skill TEXT,
                 user_message TEXT NOT NULL,
                 agent_response TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-                content TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_memories_ts ON memories(timestamp);",
+            CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp);",
         )?;
         Ok(Self { conn })
+    }
+
+    fn now_local() -> String {
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
     }
 
     pub fn log_interaction(
@@ -51,38 +49,15 @@ impl Storage {
         agent_response: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO interactions (source, skill, user_message, agent_response) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![source, skill, user_message, agent_response],
+            "INSERT INTO interactions (timestamp, source, skill, user_message, agent_response) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![Self::now_local(), source, skill, user_message, agent_response],
         )?;
         Ok(())
     }
 
-    pub fn store_memory(&self, content: &str) -> Result<()> {
-        self.conn
-            .execute("INSERT INTO memories (content) VALUES (?1)", [content])?;
-        Ok(())
-    }
-
-    /// Build a context string from memories and recent interactions for the system prompt.
+    /// Build a context string from recent interactions for the system prompt.
     pub fn build_context(&self) -> Result<String> {
         let mut ctx = String::new();
-
-        // Load all memories
-        let mut stmt = self
-            .conn
-            .prepare("SELECT timestamp, content FROM memories ORDER BY timestamp")?;
-        let memories: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if !memories.is_empty() {
-            ctx.push_str("# Things I Remember\n\n");
-            for (ts, content) in &memories {
-                let date = truncate(ts, 10);
-                ctx.push_str(&format!("- {} ({})\n", content, date));
-            }
-            ctx.push('\n');
-        }
 
         // Load recent interactions (last 20, reversed to chronological)
         let mut stmt = self.conn.prepare(
@@ -120,6 +95,34 @@ impl Storage {
 
         Ok(ctx)
     }
+
+    /// Count interactions within a time window.
+    /// `since` is a SQLite datetime string (local time), or None for all.
+    pub fn count_interactions(&self, since: Option<&str>) -> Result<usize> {
+        let count: usize = match since {
+            Some(ts) => self.conn.query_row(
+                "SELECT COUNT(*) FROM interactions WHERE timestamp >= ?1",
+                [ts],
+                |row| row.get(0),
+            )?,
+            None => self
+                .conn
+                .query_row("SELECT COUNT(*) FROM interactions", [], |row| row.get(0))?,
+        };
+        Ok(count)
+    }
+
+    /// Delete interactions within a time window.
+    /// `since` is a SQLite datetime string (local time), or None for all.
+    pub fn delete_interactions(&self, since: Option<&str>) -> Result<usize> {
+        let deleted = match since {
+            Some(ts) => self
+                .conn
+                .execute("DELETE FROM interactions WHERE timestamp >= ?1", [ts])?,
+            None => self.conn.execute("DELETE FROM interactions", [])?,
+        };
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
@@ -129,17 +132,6 @@ mod tests {
 
     fn temp_storage() -> Storage {
         Storage::open(&PathBuf::from(":memory:")).unwrap()
-    }
-
-    #[test]
-    fn test_memory_roundtrip() {
-        let s = temp_storage();
-        s.store_memory("Safety word is banana").unwrap();
-        s.store_memory("User prefers dark mode").unwrap();
-
-        let ctx = s.build_context().unwrap();
-        assert!(ctx.contains("Safety word is banana"));
-        assert!(ctx.contains("User prefers dark mode"));
     }
 
     #[test]

@@ -17,7 +17,8 @@ pub async fn run(address: &str) -> Result<()> {
     let mut stdin_reader = BufReader::new(stdin);
 
     println!("OpenFerris TUI — connected to daemon at {}", address);
-    println!("Type your message and press Enter. Ctrl+C to quit.\n");
+    println!("Type your message and press Enter. Ctrl+C to quit.");
+    println!("  /remember <fact> — save a memory directly\n");
 
     loop {
         eprint!("> ");
@@ -37,12 +38,27 @@ pub async fn run(address: &str) -> Result<()> {
             continue;
         }
 
-        let request = DaemonRequest {
-            id: uuid::Uuid::new_v4().to_string(),
-            kind: RequestKind::FreeformMessage {
-                text: input.to_string(),
-            },
-            source: Some("tui".to_string()),
+        let request = if let Some(fact) = input.strip_prefix("/remember ") {
+            let fact = fact.trim();
+            if fact.is_empty() {
+                eprintln!("Usage: /remember <fact to remember>");
+                continue;
+            }
+            DaemonRequest {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: RequestKind::StoreMemory {
+                    content: fact.to_string(),
+                },
+                source: Some("tui".to_string()),
+            }
+        } else {
+            DaemonRequest {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: RequestKind::FreeformMessage {
+                    text: input.to_string(),
+                },
+                source: Some("tui".to_string()),
+            }
         };
 
         let mut data = serde_json::to_string(&request)?;

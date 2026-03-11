@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::agent::{Agent, AgentResult};
 use crate::config::{self, AppConfig};
 use crate::llm::{ChatMessage, Role};
+use crate::memories::Memories;
 use crate::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
 use crate::skills;
 use crate::storage::Storage;
@@ -26,27 +27,61 @@ struct LogData {
     result: AgentResult,
 }
 
-pub async fn run(config: AppConfig, agent: Agent, storage: Storage) -> Result<()> {
+pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Memories) -> Result<()> {
     let agent = Arc::new(agent);
     let listener = TcpListener::bind(&config.daemon.listen).await?;
     tracing::info!("OpenFerris daemon listening on {}", config.daemon.listen);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<QueuedRequest>();
 
-    // Single worker task — processes requests sequentially, owns storage.
-    // Storage is accessed only before/after the async agent call (never across .await).
+    // Single worker task — processes requests sequentially, owns storage and memories.
     let worker_agent = agent.clone();
     let user_skills_dir = config::config_dir().join("skills");
     tokio::spawn(async move {
         while let Some(queued) = rx.recv().await {
-            // Sync: load persistent context from storage
-            let persistent_context = match storage.build_context() {
+            let request_id = queued.request.id.clone();
+
+            // Handle StoreMemory directly — no agent needed.
+            if let RequestKind::StoreMemory { ref content } = queued.request.kind {
+                let response = match memories.add(content) {
+                    Ok(()) => {
+                        tracing::info!("Manual memory stored: {}", content);
+                        DaemonResponse {
+                            request_id,
+                            kind: ResponseKind::Done {
+                                text: format!("Remembered: {}", content),
+                            },
+                        }
+                    }
+                    Err(e) => DaemonResponse {
+                        request_id,
+                        kind: ResponseKind::Error {
+                            message: format!("Failed to store memory: {}", e),
+                        },
+                    },
+                };
+                let _ = queued.response_tx.send(response);
+                continue;
+            }
+
+            // Sync: load persistent context from storage + memories
+            let interaction_context = match storage.build_context() {
                 Ok(ctx) => ctx,
                 Err(e) => {
-                    tracing::warn!("Failed to load context: {}", e);
+                    tracing::warn!("Failed to load interaction context: {}", e);
                     String::new()
                 }
             };
+
+            let memory_context = match memories.load_for_prompt() {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    tracing::warn!("Failed to load memories: {}", e);
+                    String::new()
+                }
+            };
+
+            let persistent_context = format!("{}{}", memory_context, interaction_context);
 
             // Async: run agent
             let (response, log_data) = process_request(
@@ -69,7 +104,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage) -> Result<()
                 }
                 for memory in &data.result.memories {
                     tracing::info!("Storing memory: {}", memory);
-                    if let Err(e) = storage.store_memory(memory) {
+                    if let Err(e) = memories.add(memory) {
                         tracing::warn!("Failed to store memory: {}", e);
                     }
                 }
@@ -288,5 +323,7 @@ async fn process_request(
                 ),
             }
         }
+        // StoreMemory is handled directly in the worker loop above.
+        RequestKind::StoreMemory { .. } => unreachable!(),
     }
 }
