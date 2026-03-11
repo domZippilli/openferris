@@ -165,7 +165,9 @@ Prepare a morning briefing for your human. Include:
 3. Motivational note
 ```
 
-The `tools` field is the **tool sieve** — it declares which tools this skill is allowed to use. The agent loop enforces this: if the LLM tries to call a tool not in the list, the call is rejected.
+The `tools` field controls which tools are visible to the agent during that skill's execution. This keeps the LLM focused — a simple skill like `daily-briefing` only sees `datetime`, reducing prompt noise and improving response quality.
+
+Note: the tool list is a **focus mechanism, not a security boundary**. Since the agent can create its own skills in the workspace, it can give itself access to any registered tool. The real security boundary is the **tool registry** — only tools compiled into the binary exist. The agent cannot invent new tools or escape the sandbox.
 
 **Bundled skills:** `default` (freeform conversation) and `daily-briefing`.
 
@@ -175,7 +177,7 @@ Skill lookup order:
 2. **Workspace skills:** `~/.local/share/openferris/workspace/skills/<name>/SKILL.md` — agent-created
 3. **Bundled skills** — compiled into the binary as starters
 
-The agent can create and modify its own skills by writing to the workspace. User skills always take priority, so you can override anything the agent creates. The tool sieve is enforced in Rust at execution time — a skill can only use tools that actually exist in the registry, regardless of what it declares.
+The agent can create and modify its own skills by writing to the workspace. User skills always take priority, so you can override anything the agent creates.
 
 ## Tools
 
@@ -223,7 +225,7 @@ OpenFerris is in early development. The core architecture is functional:
 - [x] Agent loop with tool call parsing and execution
 - [x] llama.cpp backend (OpenAI-compatible API)
 - [x] Skill system with AgentSkills format
-- [x] Tool system with per-skill sieve
+- [x] Tool system with per-skill focus lists
 - [x] CLI client and interactive TUI
 - [x] Persistent memory (markdown) and interaction history (SQLite)
 - [ ] Additional tools (web search, weather, messaging)

@@ -73,7 +73,7 @@ Skills follow the [AgentSkills](https://agentskills.io) format: a directory cont
 skills/
 ├── daily-briefing/
 │   └── SKILL.md
-├── triage/
+├── default/
 │   └── SKILL.md
 ├── email-summary/
 │   └── SKILL.md
@@ -115,7 +115,7 @@ Tool invocation flow (simplified, not native LLM function calling):
 
 The exact marker format is TBD — could be XML-style tags, JSON blocks, or similar. Must be simple enough for local models (llama.cpp) to produce reliably.
 
-**Tool sieve:** Skills declare which tools they are allowed to use. The agent loop enforces this — if the LLM requests a tool not in the skill's allowlist, the call is rejected. This is a security boundary: dangerous tools (e.g., shell execution) are never available unless a skill explicitly opts in. Users can extend the allowlist per-skill via configuration, but the defaults are restrictive.
+**Tool focus list:** Skills declare which tools are visible during execution. This is a focus mechanism — it reduces prompt noise and keeps the LLM on task. Since the agent can create its own skills in the workspace, it can give itself access to any registered tool. The real security boundary is the tool registry: only tools compiled into the binary exist. The agent cannot invent new capabilities.
 
 ### 5. Secrets
 
@@ -150,7 +150,7 @@ The single brain of OpenFerris. A long-running process (`openferris daemon`) man
 - **Owns the LLM session** — maintains persistent context (SOUL, conversation history, daily notes)
 - Listens on TCP localhost for requests from all clients (CLI subcommands, cron jobs, listeners, TUI)
 - Queues requests and processes them sequentially, one at a time
-- Loads the appropriate skill context (or triage skill for freeform messages)
+- Loads the appropriate skill context (or default skill for freeform messages)
 - Runs the agent loop: sends prompt to LLM, parses tool calls, executes tools, feeds results back
 - Sends responses back to the originating client via the TCP connection
 
@@ -202,7 +202,7 @@ The `dailybriefing` skill demonstrates the full flow:
 2. The CLI process connects to the daemon via TCP, sends `{"skill": "dailybriefing"}`
 3. The daemon loads `skills/daily-briefing/SKILL.md` into the LLM session (SOUL.md is already in context)
 4. The skill says: "Get weather, get time, get news, compose a briefing, send via Telegram"
-5. Available tools (per skill allowlist): `weather`, `news`, `datetime`, `send_telegram`
+5. Available tools (per skill tool list): `weather`, `news`, `datetime`, `send_telegram`
 6. The daemon runs the agent loop: LLM calls tools, daemon executes them, feeds results back
 7. The LLM composes the briefing and calls `send_telegram` to deliver it
 8. The daemon sends a completion response back to the CLI process, which exits
@@ -263,7 +263,7 @@ openferris/
 ├── skills/                 # Bundled skill definitions
 │   ├── daily-briefing/
 │   │   └── SKILL.md
-│   └── triage/
+│   └── default/
 │       └── SKILL.md
 ├── tools/                  # Tool description files (for LLM context)
 │   ├── brave_search.md
@@ -281,10 +281,10 @@ openferris/
 - **Daemon IPC** — TCP on localhost. More robust than Unix sockets.
 - **Daemon protocol** — JSON lines over TCP.
 - **llama.cpp** — User-managed, already running. OpenFerris connects to it. Assume 100-200k context.
-- **Tool invocation** — Structured markers parsed by OpenFerris. LLM has flexibility to compose tool calls. Tool sieve enforces per-skill allowlists.
+- **Tool invocation** — Structured markers parsed by OpenFerris. LLM has flexibility to compose tool calls. Per-skill tool lists control prompt focus; the tool registry is the security boundary.
 - **No heartbeat** — Cron only. If a heartbeat-like check is needed later, it's just another cron job.
 - **Output routing** — Skills handle their own delivery. A skill explicitly calls a delivery tool (e.g., `send_telegram`) as part of its instructions. No global output router.
-- **Freeform mode** — When the daemon receives a message that doesn't match a specific skill, it loads SOUL.md + a default "triage" skill that helps the agent figure out how to help the user, with access to all tools.
+- **Freeform mode** — When the daemon receives a message that doesn't match a specific skill, it loads SOUL.md + the default skill that helps the agent figure out how to help the user, with access to all tools.
 - **Concurrency** — One request at a time. Queue is processed sequentially.
 
 ## Open Questions
