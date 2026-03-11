@@ -63,21 +63,37 @@ fn get_bundled_skill(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Load a skill by name, checking user directory first, then bundled
+/// Load a skill by name. Lookup order:
+/// 1. User skills: ~/.config/openferris/skills/<name>/SKILL.md
+/// 2. Workspace skills: ~/.local/share/openferris/workspace/skills/<name>/SKILL.md (agent-created)
+/// 3. Bundled skills compiled into the binary
 pub fn load_skill(name: &str, user_skills_dir: &Path) -> Result<Skill> {
+    // 1. User-managed skills
     let user_skill_path = user_skills_dir.join(name).join("SKILL.md");
     if user_skill_path.exists() {
         return load_skill_from_file(&user_skill_path);
     }
 
+    // 2. Agent-created skills in workspace
+    let workspace_skill_path = crate::config::data_dir()
+        .join("workspace")
+        .join("skills")
+        .join(name)
+        .join("SKILL.md");
+    if workspace_skill_path.exists() {
+        return load_skill_from_file(&workspace_skill_path);
+    }
+
+    // 3. Bundled skills
     if let Some(content) = get_bundled_skill(name) {
         return load_skill_from_str(content);
     }
 
     anyhow::bail!(
-        "Skill '{}' not found. Checked:\n  - {}\n  - bundled skills",
+        "Skill '{}' not found. Checked:\n  - {}\n  - {}\n  - bundled skills",
         name,
-        user_skill_path.display()
+        user_skill_path.display(),
+        workspace_skill_path.display()
     )
 }
 

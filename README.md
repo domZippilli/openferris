@@ -169,7 +169,13 @@ The `tools` field is the **tool sieve** — it declares which tools this skill i
 
 **Bundled skills:** `default` (freeform conversation) and `daily-briefing`.
 
-**Custom skills:** Place them in `~/.config/openferris/skills/<skill-name>/SKILL.md`. User skills override bundled ones with the same name.
+Skill lookup order:
+
+1. **User skills:** `~/.config/openferris/skills/<name>/SKILL.md` — you always win
+2. **Workspace skills:** `~/.local/share/openferris/workspace/skills/<name>/SKILL.md` — agent-created
+3. **Bundled skills** — compiled into the binary as starters
+
+The agent can create and modify its own skills by writing to the workspace. User skills always take priority, so you can override anything the agent creates. The tool sieve is enforced in Rust at execution time — a skill can only use tools that actually exist in the registry, regardless of what it declares.
 
 ## Tools
 
@@ -180,8 +186,16 @@ Tools are capabilities the agent can invoke. Each tool is a Rust module with a n
 | Tool | Description |
 |------|-------------|
 | `datetime` | Returns current date/time in the user's configured timezone |
+| `read_file` | Read file contents (sandboxed) |
+| `write_file` | Write/create files (sandboxed) |
+| `list_dir` | List directory contents (sandboxed) |
 
-More tools (web search, weather, messaging) will be added as the project grows.
+File tools are restricted to `~/.local/share/openferris/workspace/` by default. Add extra directories in config:
+
+```toml
+[files]
+allowed_directories = ["~/notes", "~/documents"]
+```
 
 ## Configuration Reference
 
