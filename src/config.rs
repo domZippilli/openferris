@@ -76,6 +76,16 @@ pub fn load_config() -> Result<AppConfig> {
     Ok(config)
 }
 
+/// Load identity from ~/.local/share/openferris/IDENTITY.md, falling back to bundled default.
+pub fn load_identity() -> String {
+    let user_identity = data_dir().join("IDENTITY.md");
+    if user_identity.exists() {
+        std::fs::read_to_string(&user_identity).unwrap_or_default()
+    } else {
+        include_str!("../IDENTITY.md").to_string()
+    }
+}
+
 pub fn load_soul() -> Result<String> {
     let user_soul = config_dir().join("SOUL.md");
     if user_soul.exists() {

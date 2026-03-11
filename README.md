@@ -133,6 +133,20 @@ Check status with `systemctl --user status openferris`.
 
 The daemon is the only process that talks to the LLM. All clients connect to it over TCP localhost (default `127.0.0.1:7700`), send a JSON-line request, and receive a JSON-line response.
 
+## Context & Memory
+
+The agent's system prompt is assembled fresh on every request from several layers:
+
+1. **SOUL** — the agent's personality (`SOUL.md`). Loaded once at daemon startup. Customize by placing one in `~/.config/openferris/`.
+2. **Memories** — long-term facts stored in `~/.local/share/openferris/MEMORIES.md`. Read fresh on every request, so new memories are immediately available. The agent saves memories automatically via `<memory>` tags, or you can save them directly in the TUI with `/remember <fact>`.
+3. **Recent interactions** — the last 20 exchanges from SQLite (`~/.local/share/openferris/openferris.db`), giving the agent short-term conversational context across all interfaces.
+4. **Skill prompt** — instructions from the active skill's `SKILL.md`.
+5. **Tool descriptions** — filtered by the skill's tool allowlist.
+
+Memories and interactions are shared across all interfaces (TUI, CLI, cron, future Telegram/etc.), so the agent stays coherent regardless of how you talk to it. The TUI also maintains per-session conversation history for multi-turn exchanges.
+
+To clear history: `openferris forget [window]` (e.g. `1h`, `7d`, `all`).
+
 ## Skills
 
 Skills are markdown files that tell the agent what to do. They follow the [AgentSkills](https://agentskills.io) format — a `SKILL.md` with YAML frontmatter:
@@ -197,7 +211,7 @@ OpenFerris is in early development. The core architecture is functional:
 - [x] Skill system with AgentSkills format
 - [x] Tool system with per-skill sieve
 - [x] CLI client and interactive TUI
-- [ ] SQLite storage for daily notes and memory
+- [x] Persistent memory (markdown) and interaction history (SQLite)
 - [ ] Additional tools (web search, weather, messaging)
 - [ ] Channel listeners (Telegram, Gmail)
 - [ ] More LLM backends (Claude CLI, direct API)

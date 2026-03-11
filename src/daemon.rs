@@ -83,11 +83,15 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
 
             let persistent_context = format!("{}{}", memory_context, interaction_context);
 
+            // Sync: load identity (re-read each time so edits take effect)
+            let identity = config::load_identity();
+
             // Async: run agent
             let (response, log_data) = process_request(
                 &worker_agent,
                 &queued,
                 &user_skills_dir,
+                &identity,
                 &persistent_context,
             )
             .await;
@@ -227,6 +231,7 @@ async fn process_request(
     agent: &Agent,
     queued: &QueuedRequest,
     user_skills_dir: &std::path::Path,
+    identity: &str,
     persistent_context: &str,
 ) -> (DaemonResponse, Option<LogData>) {
     let request_id = queued.request.id.clone();
@@ -241,7 +246,7 @@ async fn process_request(
             match skills::load_skill(skill_name, user_skills_dir) {
                 Ok(skill) => {
                     let msg = format!("Execute the {} skill now.", skill_name);
-                    match agent.run(&skill, &msg, &[], persistent_context).await {
+                    match agent.run(&skill, &msg, &[], identity, persistent_context).await {
                         Ok(result) => {
                             let log = LogData {
                                 source,
@@ -283,7 +288,7 @@ async fn process_request(
             match skills::load_skill("triage", user_skills_dir) {
                 Ok(skill) => {
                     match agent
-                        .run(&skill, text, &queued.session_history, persistent_context)
+                        .run(&skill, text, &queued.session_history, identity, persistent_context)
                         .await
                     {
                         Ok(result) => {
