@@ -1,5 +1,6 @@
 pub mod datetime;
 pub mod files;
+pub mod gws;
 pub mod schedule;
 pub mod telegram;
 pub mod web;
@@ -73,6 +74,7 @@ impl ToolRegistry {
         self.register(Box::new(files::ListDirTool::new(allowed_dirs)));
         self.register(Box::new(web::FetchUrlTool));
         self.register(Box::new(schedule::ScheduleTool));
+        self.register(Box::new(gws::GwsTool));
 
         if let Some(ref tg) = config.telegram {
             self.register(Box::new(telegram::SendTelegramTool::new(

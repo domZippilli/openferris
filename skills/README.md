@@ -42,6 +42,7 @@ skill is invoked. Be specific about what you want the agent to do.
 - `fetch_url` — Fetch a web page or API endpoint. Params: `{"url": "..."}`
 - `schedule` — Manage cron-based skill schedules. Params: `{"action": "add|remove|list", "skill_name": "...", "cron_expr": "..."}`
 - `send_telegram` — Send a message via Telegram. Params: `{"message": "...", "chat_id": <optional>}`
+- `gws` — Run a Google Workspace CLI command. Params: `{"command": "..."}`. Destructive operations (delete, trash, send) are blocked.
 
 File tools are sandboxed to allowed directories only.
 

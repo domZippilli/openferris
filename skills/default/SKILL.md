@@ -9,6 +9,7 @@ tools:
   - fetch_url
   - schedule
   - send_telegram
+  - gws
 ---
 
 You received a message from your human. Help them with whatever they need.
