@@ -83,8 +83,9 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
 
             let persistent_context = format!("{}{}", memory_context, interaction_context);
 
-            // Sync: load identity (re-read each time so edits take effect)
+            // Sync: load identity and user profile (re-read each time so edits take effect)
             let identity = config::load_identity();
+            let user_profile = config::load_user();
 
             // Async: run agent
             let (response, log_data) = process_request(
@@ -92,6 +93,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                 &queued,
                 &user_skills_dir,
                 &identity,
+                &user_profile,
                 &persistent_context,
             )
             .await;
@@ -232,6 +234,7 @@ async fn process_request(
     queued: &QueuedRequest,
     user_skills_dir: &std::path::Path,
     identity: &str,
+    user_profile: &str,
     persistent_context: &str,
 ) -> (DaemonResponse, Option<LogData>) {
     let request_id = queued.request.id.clone();
@@ -246,7 +249,7 @@ async fn process_request(
             match skills::load_skill(skill_name, user_skills_dir) {
                 Ok(skill) => {
                     let msg = format!("Execute the {} skill now.", skill_name);
-                    match agent.run(&skill, &msg, &[], identity, persistent_context).await {
+                    match agent.run(&skill, &msg, &[], identity, user_profile, persistent_context).await {
                         Ok(result) => {
                             let log = LogData {
                                 source,
@@ -288,7 +291,7 @@ async fn process_request(
             match skills::load_skill("triage", user_skills_dir) {
                 Ok(skill) => {
                     match agent
-                        .run(&skill, text, &queued.session_history, identity, persistent_context)
+                        .run(&skill, text, &queued.session_history, identity, user_profile, persistent_context)
                         .await
                     {
                         Ok(result) => {

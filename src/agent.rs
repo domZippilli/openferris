@@ -34,9 +34,10 @@ impl Agent {
         user_message: &str,
         history: &[ChatMessage],
         identity: &str,
+        user_profile: &str,
         persistent_context: &str,
     ) -> Result<AgentResult> {
-        let system_prompt = self.build_system_prompt(skill, identity, persistent_context);
+        let system_prompt = self.build_system_prompt(skill, identity, user_profile, persistent_context);
 
         let mut messages = vec![ChatMessage {
             role: Role::System,
@@ -98,7 +99,7 @@ impl Agent {
         anyhow::bail!("Agent exceeded maximum iterations ({})", MAX_ITERATIONS)
     }
 
-    fn build_system_prompt(&self, skill: &Skill, identity: &str, persistent_context: &str) -> String {
+    fn build_system_prompt(&self, skill: &Skill, identity: &str, user_profile: &str, persistent_context: &str) -> String {
         let tool_descriptions = self.tools.get_descriptions(&skill.tools);
 
         let mut prompt = String::new();
@@ -110,6 +111,12 @@ impl Agent {
         // IDENTITY
         if !identity.is_empty() {
             prompt.push_str(identity);
+            prompt.push_str("\n\n");
+        }
+
+        // USER
+        if !user_profile.is_empty() {
+            prompt.push_str(user_profile);
             prompt.push_str("\n\n");
         }
 

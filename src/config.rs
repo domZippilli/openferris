@@ -85,6 +85,16 @@ pub fn load_config() -> Result<AppConfig> {
     Ok(config)
 }
 
+/// Load user profile from ~/.local/share/openferris/USER.md, falling back to bundled default.
+pub fn load_user() -> String {
+    let user_file = data_dir().join("USER.md");
+    if user_file.exists() {
+        std::fs::read_to_string(&user_file).unwrap_or_default()
+    } else {
+        include_str!("../USER.md").to_string()
+    }
+}
+
 /// Load identity from ~/.local/share/openferris/IDENTITY.md, falling back to bundled default.
 pub fn load_identity() -> String {
     let user_identity = data_dir().join("IDENTITY.md");
