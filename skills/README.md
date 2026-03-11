@@ -39,6 +39,7 @@ skill is invoked. Be specific about what you want the agent to do.
 - `read_file` — Read a file. Params: `{"path": "..."}`
 - `write_file` — Write a file. Params: `{"path": "...", "content": "..."}`
 - `list_dir` — List directory contents. Params: `{"path": "..."}`
+- `fetch_url` — Fetch a web page or API endpoint. Params: `{"url": "..."}`
 
 File tools are sandboxed to allowed directories only.
 

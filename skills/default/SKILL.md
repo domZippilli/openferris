@@ -6,6 +6,7 @@ tools:
   - read_file
   - write_file
   - list_dir
+  - fetch_url
 ---
 
 You received a message from your human. Help them with whatever they need.

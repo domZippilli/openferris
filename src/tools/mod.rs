@@ -1,5 +1,6 @@
 pub mod datetime;
 pub mod files;
+pub mod web;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -68,5 +69,6 @@ impl ToolRegistry {
         self.register(Box::new(files::ReadFileTool::new(allowed_dirs.clone())));
         self.register(Box::new(files::WriteFileTool::new(allowed_dirs.clone())));
         self.register(Box::new(files::ListDirTool::new(allowed_dirs)));
+        self.register(Box::new(web::FetchUrlTool));
     }
 }
