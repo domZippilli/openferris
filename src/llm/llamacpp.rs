@@ -1,0 +1,98 @@
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+
+use super::{ChatMessage, LlmBackend};
+
+pub struct LlamaCppBackend {
+    client: Client,
+    endpoint: String,
+    model: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<ApiMessage>,
+}
+
+#[derive(Serialize)]
+struct ApiMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<Choice>,
+}
+
+#[derive(Deserialize)]
+struct Choice {
+    message: ResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct ResponseMessage {
+    content: String,
+}
+
+impl LlamaCppBackend {
+    pub fn new(endpoint: String, model: Option<String>) -> Self {
+        Self {
+            client: Client::new(),
+            endpoint,
+            model,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmBackend for LlamaCppBackend {
+    async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
+        let api_messages: Vec<ApiMessage> = messages
+            .iter()
+            .map(|m| ApiMessage {
+                role: m.role.as_str().to_string(),
+                content: m.content.clone(),
+            })
+            .collect();
+
+        let request = ChatRequest {
+            model: self.model.clone().unwrap_or_else(|| "default".to_string()),
+            messages: api_messages,
+        };
+
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.endpoint.trim_end_matches('/')
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to connect to llama.cpp server")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("llama.cpp returned HTTP {}: {}", status, body);
+        }
+
+        let chat_response: ChatResponse = response
+            .json()
+            .await
+            .context("Failed to parse llama.cpp response")?;
+
+        chat_response
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .ok_or_else(|| anyhow::anyhow!("No choices in llama.cpp response"))
+    }
+}
