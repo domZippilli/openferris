@@ -143,7 +143,7 @@ impl Agent {
                 "To call a tool, include a tool_call block in your response like this:\n\n",
             );
             prompt.push_str("<tool_call>\n");
-            prompt.push_str("{\"tool\": \"tool_name\", \"params\": {}}\n");
+            prompt.push_str("{\"function\": \"tool_name\", \"parameters\": {}}\n");
             prompt.push_str("</tool_call>\n\n");
             prompt.push_str("The system will execute the tool and return the result in a <tool_result> block.\n");
             prompt.push_str("You may call tools multiple times. When you have all the information you need, respond with your final answer without any <tool_call> blocks.\n\n");
@@ -182,12 +182,12 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
             match serde_json::from_str::<serde_json::Value>(inner) {
                 Ok(parsed) => {
                     let name = parsed
-                        .get("tool")
+                        .get("function")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
                     let params = parsed
-                        .get("params")
+                        .get("parameters")
                         .cloned()
                         .unwrap_or(serde_json::Value::Object(Default::default()));
 
@@ -268,7 +268,7 @@ mod tests {
         let text = r#"Let me check the time.
 
 <tool_call>
-{"tool": "datetime", "params": {}}
+{"function": "datetime", "parameters": {}}
 </tool_call>"#;
         let calls = parse_tool_calls(text);
         assert_eq!(calls.len(), 1);
@@ -280,11 +280,11 @@ mod tests {
         let text = r#"I need two things.
 
 <tool_call>
-{"tool": "datetime", "params": {}}
+{"function": "datetime", "parameters": {}}
 </tool_call>
 
 <tool_call>
-{"tool": "weather", "params": {"zip": "10001"}}
+{"function": "weather", "parameters": {"zip": "10001"}}
 </tool_call>"#;
         let calls = parse_tool_calls(text);
         assert_eq!(calls.len(), 2);
