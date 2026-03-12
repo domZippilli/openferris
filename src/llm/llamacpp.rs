@@ -19,6 +19,9 @@ struct ChatRequest {
     /// Pin to a specific llama.cpp slot for KV cache reuse across requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     id_slot: Option<i32>,
+    /// Override the server's default n_predict. -1 = unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -35,6 +38,8 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: ResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +78,7 @@ impl LlmBackend for LlamaCppBackend {
             model: self.model.clone().unwrap_or_else(|| "default".to_string()),
             messages: api_messages,
             id_slot: Some(self.slot),
+            max_tokens: Some(-1),
         };
 
         let url = format!(
@@ -99,11 +105,18 @@ impl LlmBackend for LlamaCppBackend {
             .await
             .context("Failed to parse llama.cpp response")?;
 
-        chat_response
+        let choice = chat_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
-            .ok_or_else(|| anyhow::anyhow!("No choices in llama.cpp response"))
+            .ok_or_else(|| anyhow::anyhow!("No choices in llama.cpp response"))?;
+
+        if let Some(reason) = &choice.finish_reason {
+            if reason == "length" {
+                tracing::warn!("LLM output truncated (finish_reason=length) — response may be incomplete");
+            }
+        }
+
+        Ok(choice.message.content)
     }
 }
