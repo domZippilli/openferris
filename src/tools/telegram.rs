@@ -27,8 +27,9 @@ impl Tool for SendTelegramTool {
         "Send a message via Telegram. \
          Parameters: {\"message\": \"<text>\", \"parse_mode\": \"<optional: MarkdownV2 or HTML>\", \"chat_id\": <optional number>}. \
          If chat_id is omitted, the message is sent to the default configured chat. \
-         parse_mode enables formatting: use \"MarkdownV2\" for *bold*, _italic_, `code`, ```code blocks```, \
-         or \"HTML\" for <b>bold</b>, <i>italic</i>, <code>code</code>. If omitted, plain text is sent. \
+         parse_mode enables formatting: use \"MarkdownV2\" for *bold*, _italic_, `code`, ```code blocks```. \
+         Special characters are auto-escaped for MarkdownV2 — just write naturally with formatting markers. \
+         Or use \"HTML\" for <b>bold</b>, <i>italic</i>, <code>code</code>. If omitted, plain text is sent. \
          Use this to deliver results, notifications, or replies to the user via Telegram."
     }
 
@@ -53,12 +54,19 @@ impl Tool for SendTelegramTool {
             .and_then(|v| v.as_str())
             .filter(|m| *m == "MarkdownV2" || *m == "HTML");
 
+        // Auto-escape MarkdownV2 special characters so the agent doesn't have to
+        let message = if parse_mode == Some("MarkdownV2") {
+            escape_markdownv2(message)
+        } else {
+            message.to_string()
+        };
+
         let base_url = format!("https://api.telegram.org/bot{}", self.bot_token);
 
         let client = reqwest::Client::new();
 
         // Telegram has a 4096 char limit per message
-        let chunks = chunk_message(message, 4096);
+        let chunks = chunk_message(&message, 4096);
 
         for chunk in &chunks {
             let mut body = serde_json::json!({
@@ -89,6 +97,76 @@ impl Tool for SendTelegramTool {
     }
 }
 
+/// Escape MarkdownV2 special characters, preserving intentional formatting.
+///
+/// Telegram requires escaping: _ * [ ] ( ) ~ ` > # + - = | { } . !
+/// We preserve paired formatting markers: *bold*, _italic_, `code`, ```blocks```
+/// Everything else gets escaped.
+fn escape_markdownv2(text: &str) -> String {
+    // Characters that must be escaped in MarkdownV2 outside of formatting
+    const SPECIAL: &[char] = &[
+        '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
+    ];
+
+    let mut result = String::with_capacity(text.len() * 2);
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let c = chars[i];
+
+        // Preserve ``` code blocks ```
+        if c == '`' && i + 2 < len && chars[i + 1] == '`' && chars[i + 2] == '`' {
+            result.push_str("```");
+            i += 3;
+            // Copy everything until closing ```
+            while i < len {
+                if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+                    result.push_str("```");
+                    i += 3;
+                    break;
+                }
+                result.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Preserve `inline code`
+        if c == '`' {
+            result.push('`');
+            i += 1;
+            while i < len && chars[i] != '`' {
+                result.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                result.push('`');
+                i += 1;
+            }
+            continue;
+        }
+
+        // Preserve *bold* and _italic_ — pass through the marker chars
+        if (c == '*' || c == '_') && i + 1 < len {
+            result.push(c);
+            i += 1;
+            continue;
+        }
+
+        // Escape special characters
+        if SPECIAL.contains(&c) {
+            result.push('\\');
+        }
+
+        result.push(c);
+        i += 1;
+    }
+
+    result
+}
+
 fn chunk_message(text: &str, max_len: usize) -> Vec<&str> {
     if text.len() <= max_len {
         return vec![text];
@@ -112,4 +190,49 @@ fn chunk_message(text: &str, max_len: usize) -> Vec<&str> {
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_special_chars() {
+        assert_eq!(
+            escape_markdownv2("Check out https://example.com/path.html"),
+            "Check out https://example\\.com/path\\.html"
+        );
+    }
+
+    #[test]
+    fn test_preserve_bold_italic() {
+        assert_eq!(
+            escape_markdownv2("*bold* and _italic_"),
+            "*bold* and _italic_"
+        );
+    }
+
+    #[test]
+    fn test_preserve_inline_code() {
+        assert_eq!(
+            escape_markdownv2("run `ls -la` now"),
+            "run `ls -la` now"
+        );
+    }
+
+    #[test]
+    fn test_preserve_code_block() {
+        assert_eq!(
+            escape_markdownv2("```\ncode.here()\n```"),
+            "```\ncode.here()\n```"
+        );
+    }
+
+    #[test]
+    fn test_escape_mixed() {
+        assert_eq!(
+            escape_markdownv2("Hello! Score: 5-3 (win)"),
+            "Hello\\! Score: 5\\-3 \\(win\\)"
+        );
+    }
 }
