@@ -52,10 +52,18 @@ pub async fn run(daemon_address: String, tg_config: TelegramConfig) -> Result<()
             tracing::info!("Telegram message from user {}", user_id);
             tracing::debug!("Telegram message content: {}", text);
 
-            // Show "typing..." indicator while processing
-            let _ = send_chat_action(&http, &base_url, chat_id, "typing").await;
+            // Keep "typing..." indicator alive while the agent works
+            let typing_http = http.clone();
+            let typing_url = base_url.clone();
+            let typing_handle = tokio::spawn(async move {
+                loop {
+                    let _ = send_chat_action(&typing_http, &typing_url, chat_id, "typing").await;
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                }
+            });
 
             let response = handle_message(&text, &daemon_address).await;
+            typing_handle.abort();
 
             // Telegram has a 4096 char message limit
             for chunk in chunk_message(&response, 4096) {
