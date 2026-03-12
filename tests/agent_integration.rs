@@ -132,8 +132,8 @@ async fn test_multiple_tool_calls_in_one_response() {
 /// Agent exceeds the iteration limit and returns an error.
 #[tokio::test]
 async fn test_max_iterations_exceeded() {
-    // 21 responses, all tool calls — never a final answer
-    let responses: Vec<String> = (0..21)
+    // 51 responses, all tool calls — never a final answer
+    let responses: Vec<String> = (0..51)
         .map(|_| {
             r#"<tool_call>
 {"function": "datetime", "parameters": {}}

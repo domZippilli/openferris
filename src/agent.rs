@@ -4,7 +4,7 @@ use crate::llm::{ChatMessage, LlmBackend, Role};
 use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 
-const MAX_ITERATIONS: usize = 20;
+const MAX_ITERATIONS: usize = 50;
 
 #[derive(Clone, Debug)]
 pub struct AgentResult {
