@@ -38,7 +38,7 @@ pub async fn send_email(
     }
 
     // Compose RFC 2822
-    let raw = compose_raw(from, to, subject, body, in_reply_to, references);
+    let raw = compose_raw(from, to, None, subject, body, in_reply_to, references);
     let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
 
     let mut send_body = serde_json::json!({ "raw": encoded });
@@ -64,6 +64,7 @@ pub async fn send_email_with_db(
     db_path: &std::path::Path,
     allowed_senders: &[String],
     to: &str,
+    cc: Option<&str>,
     subject: &str,
     body: &str,
 ) -> Result<()> {
@@ -85,7 +86,7 @@ pub async fn send_email_with_db(
         }
     }
 
-    let raw = compose_raw(None, to, subject, body, None, None);
+    let raw = compose_raw(None, to, cc, subject, body, None, None);
     let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
     let send_body = serde_json::json!({ "raw": encoded });
 
@@ -103,6 +104,7 @@ pub async fn send_email_with_db(
 fn compose_raw(
     from: Option<&str>,
     to: &str,
+    cc: Option<&str>,
     subject: &str,
     body: &str,
     in_reply_to: Option<&str>,
@@ -112,7 +114,13 @@ fn compose_raw(
     if let Some(from) = from {
         msg.push_str(&format!("From: {}\r\n", from));
     }
-    msg.push_str(&format!("To: {}\r\nSubject: {}\r\n", to, subject));
+    msg.push_str(&format!("To: {}\r\n", to));
+    if let Some(cc) = cc {
+        if !cc.is_empty() {
+            msg.push_str(&format!("Cc: {}\r\n", cc));
+        }
+    }
+    msg.push_str(&format!("Subject: {}\r\n", subject));
 
     if let Some(irt) = in_reply_to {
         if !irt.is_empty() {
@@ -177,6 +185,7 @@ mod tests {
         let raw = compose_raw(
             None,
             "them@example.com",
+            None,
             "Hello",
             "Hi there!",
             None,
@@ -185,6 +194,7 @@ mod tests {
 
         assert!(!raw.contains("From:"));
         assert!(raw.contains("To: them@example.com\r\n"));
+        assert!(!raw.contains("Cc:"));
         assert!(raw.contains("Subject: Hello\r\n"));
         assert!(!raw.contains("In-Reply-To"));
         assert!(raw.contains("Hi there!"));
@@ -195,6 +205,7 @@ mod tests {
         let raw = compose_raw(
             Some("me@example.com"),
             "them@example.com",
+            None,
             "Hello",
             "Hi!",
             None,
@@ -205,10 +216,28 @@ mod tests {
     }
 
     #[test]
+    fn test_compose_raw_with_cc() {
+        let raw = compose_raw(
+            None,
+            "them@example.com",
+            Some("boss@example.com"),
+            "Hello",
+            "Hi!",
+            None,
+            None,
+        );
+
+        assert!(raw.contains("To: them@example.com\r\n"));
+        assert!(raw.contains("Cc: boss@example.com\r\n"));
+        assert!(raw.contains("Subject: Hello\r\n"));
+    }
+
+    #[test]
     fn test_compose_raw_reply() {
         let raw = compose_raw(
             Some("me@example.com"),
             "them@example.com",
+            None,
             "Re: Hello",
             "Thanks!",
             Some("<abc@mail>"),

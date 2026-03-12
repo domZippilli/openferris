@@ -91,6 +91,7 @@ impl ToolRegistry {
             self.register(Box::new(send_email::SendEmailTool::new(
                 db_path,
                 gmail.allowed_senders.clone(),
+                gmail.always_cc.clone(),
             )));
         }
     }

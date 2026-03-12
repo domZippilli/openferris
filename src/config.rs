@@ -80,6 +80,8 @@ pub struct GmailConfig {
     /// Seconds between replies to the same thread (default 300).
     #[serde(default = "default_gmail_rate_limit")]
     pub rate_limit_secs: u64,
+    /// Email address to always CC on outbound emails.
+    pub always_cc: Option<String>,
 }
 
 fn default_gmail_poll_interval() -> u64 {

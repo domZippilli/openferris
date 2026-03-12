@@ -7,13 +7,15 @@ use super::Tool;
 pub struct SendEmailTool {
     db_path: PathBuf,
     allowed_senders: Vec<String>,
+    always_cc: Option<String>,
 }
 
 impl SendEmailTool {
-    pub fn new(db_path: PathBuf, allowed_senders: Vec<String>) -> Self {
+    pub fn new(db_path: PathBuf, allowed_senders: Vec<String>, always_cc: Option<String>) -> Self {
         Self {
             db_path,
             allowed_senders,
+            always_cc,
         }
     }
 }
@@ -26,7 +28,7 @@ impl Tool for SendEmailTool {
 
     fn description_for_llm(&self) -> &str {
         "Send an email via Gmail. \
-         Parameters: {\"to\": \"<email address>\", \"subject\": \"<subject line>\", \"body\": \"<email body text>\"}. \
+         Parameters: {\"to\": \"<email address>\", \"subject\": \"<subject line>\", \"body\": \"<email body text>\", \"cc\": \"<optional cc address>\"}. \
          The recipient must be in the allowed contacts list or someone you have previously emailed. \
          Use this for sending notifications, briefings, or replies to known contacts."
     }
@@ -47,10 +49,21 @@ impl Tool for SendEmailTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: body"))?;
 
+        let param_cc = params.get("cc").and_then(|v| v.as_str());
+
+        // Merge param cc with always_cc config
+        let cc = match (param_cc, &self.always_cc) {
+            (Some(p), Some(a)) => Some(format!("{}, {}", p, a)),
+            (Some(p), None) => Some(p.to_string()),
+            (None, Some(a)) => Some(a.clone()),
+            (None, None) => None,
+        };
+
         crate::email::send_email_with_db(
             &self.db_path,
             &self.allowed_senders,
             to,
+            cc.as_deref(),
             subject,
             body,
         )
