@@ -32,7 +32,12 @@ impl Storage {
                 user_message TEXT NOT NULL,
                 agent_response TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp);",
+            CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp);
+
+            CREATE TABLE IF NOT EXISTS known_contacts (
+                email TEXT PRIMARY KEY,
+                first_contacted TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );",
         )?;
         Ok(Self { conn })
     }
@@ -110,6 +115,25 @@ impl Storage {
                 .query_row("SELECT COUNT(*) FROM interactions", [], |row| row.get(0))?,
         };
         Ok(count)
+    }
+
+    /// Check if an email address is a known contact.
+    pub fn is_contact(&self, email: &str) -> Result<bool> {
+        let count: usize = self.conn.query_row(
+            "SELECT COUNT(*) FROM known_contacts WHERE email = ?1",
+            [email.to_lowercase()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Record an email address as a known contact.
+    pub fn add_contact(&self, email: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO known_contacts (email, first_contacted) VALUES (?1, ?2)",
+            rusqlite::params![email.to_lowercase(), Self::now_local()],
+        )?;
+        Ok(())
     }
 
     /// Delete interactions within a time window.

@@ -4,6 +4,7 @@ description: Morning briefing with date, time, and a motivational note
 tools:
   - datetime
   - send_telegram
+  - send_email
 ---
 
 Prepare a morning briefing for your human. Include:

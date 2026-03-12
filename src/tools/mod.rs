@@ -2,13 +2,13 @@ pub mod datetime;
 pub mod files;
 pub mod gws;
 pub mod schedule;
+pub mod send_email;
 pub mod telegram;
 pub mod web;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
-
 use crate::config::{self, AppConfig};
 
 #[async_trait]
@@ -80,6 +80,16 @@ impl ToolRegistry {
             self.register(Box::new(telegram::SendTelegramTool::new(
                 tg.bot_token.clone(),
                 tg.default_chat_id,
+            )));
+        }
+    }
+
+    /// Register tools that need access to the database.
+    pub fn register_db_tools(&mut self, db_path: std::path::PathBuf, config: &AppConfig) {
+        if let Some(ref gmail) = config.gmail {
+            self.register(Box::new(send_email::SendEmailTool::new(
+                db_path,
+                gmail.allowed_senders.clone(),
             )));
         }
     }

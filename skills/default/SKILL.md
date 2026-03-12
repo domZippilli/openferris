@@ -9,6 +9,7 @@ tools:
   - fetch_url
   - schedule
   - send_telegram
+  - send_email
   - gws
 ---
 

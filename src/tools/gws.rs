@@ -87,7 +87,7 @@ impl Tool for GwsTool {
          {\"command\": \"calendar events list --params '{\\\"calendarId\\\": \\\"primary\\\"}'\"}. \
          Supports Drive, Gmail, Calendar, Sheets, Docs, Chat, Admin, and other Workspace APIs. \
          Returns JSON output. Use 'schema <method>' to inspect request/response schemas. \
-         Note: destructive operations (delete, trash, send, empty, remove) are blocked."
+         Note: destructive operations (delete, trash, send, empty, remove) are blocked. Use the send_email tool to send emails."
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {

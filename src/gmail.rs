@@ -2,12 +2,14 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::client;
 use crate::config::GmailConfig;
+use crate::email;
 use crate::protocol::{DaemonRequest, RequestKind};
+use crate::storage::Storage;
 
 /// Maximum email body length sent to the daemon (chars).
 const MAX_BODY_LEN: usize = 4000;
@@ -18,7 +20,6 @@ const MAX_BODY_LEN: usize = 4000;
 struct GmailState {
     history_id: Option<String>,
     our_email: Option<String>,
-    known_recipients: HashSet<String>,
     /// thread_id -> unix timestamp of last reply
     thread_reply_timestamps: HashMap<String, i64>,
 }
@@ -62,11 +63,10 @@ impl GmailState {
         }
     }
 
-    fn record_reply(&mut self, thread_id: &str, recipient: &str) {
+    fn record_reply(&mut self, thread_id: &str) {
         let now = chrono::Utc::now().timestamp();
         self.thread_reply_timestamps
             .insert(thread_id.to_string(), now);
-        self.known_recipients.insert(recipient.to_lowercase());
         self.save();
     }
 }
@@ -75,6 +75,9 @@ impl GmailState {
 
 pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()> {
     let mut state = GmailState::load();
+
+    let db_path = crate::config::data_dir().join("openferris.db");
+    let storage = Storage::open(&db_path)?;
 
     tracing::info!("Gmail listener starting...");
 
@@ -106,7 +109,7 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
     let poll_interval = std::time::Duration::from_secs(gmail_config.poll_interval_secs);
 
     loop {
-        if let Err(e) = poll_once(&daemon_address, &gmail_config, &mut state, &our_email).await {
+        if let Err(e) = poll_once(&daemon_address, &gmail_config, &storage, &mut state, &our_email).await {
             tracing::error!("Poll error: {:#}", e);
         }
         tokio::time::sleep(poll_interval).await;
@@ -116,9 +119,12 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
 async fn poll_once(
     daemon_address: &str,
     config: &GmailConfig,
+    storage: &Storage,
     state: &mut GmailState,
     our_email: &str,
 ) -> Result<()> {
+    tracing::info!("Gmail: polling for new messages");
+
     let history_id = state
         .history_id
         .as_ref()
@@ -182,7 +188,7 @@ async fn poll_once(
     tracing::info!("Gmail: {} new message(s)", message_ids.len());
 
     for msg_id in &message_ids {
-        if let Err(e) = process_message(daemon_address, config, state, our_email, msg_id).await {
+        if let Err(e) = process_message(daemon_address, config, storage, state, our_email, msg_id).await {
             tracing::error!("Error processing message {}: {:#}", msg_id, e);
         }
     }
@@ -193,6 +199,7 @@ async fn poll_once(
 async fn process_message(
     daemon_address: &str,
     config: &GmailConfig,
+    storage: &Storage,
     state: &mut GmailState,
     our_email: &str,
     msg_id: &str,
@@ -223,16 +230,16 @@ async fn process_message(
         .unwrap_or("")
         .to_string();
 
-    let sender_email = parse_email_address(&from);
+    let sender_email = email::parse_email_address(&from);
 
     // Skip our own messages
     if sender_email == our_email {
         return Ok(());
     }
 
-    // Authorization check
+    // Authorization check: config allowlist or known contact in SQLite
     let allowed = config.allowed_senders.iter().any(|s| s.to_lowercase() == sender_email)
-        || state.known_recipients.contains(&sender_email);
+        || storage.is_contact(&sender_email)?;
 
     if !allowed {
         tracing::info!("Gmail: skipping message from unauthorized sender");
@@ -303,37 +310,22 @@ async fn process_message(
         format!("Re: {}", subject)
     };
 
-    let raw = compose_reply_raw(
-        our_email,
+    email::send_email(
+        storage,
+        &config.allowed_senders,
+        Some(our_email),
         &from,
         &reply_subject,
-        &message_id_header,
-        &references,
         &response,
-    );
-
-    let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
-
-    let send_json = serde_json::json!({
-        "raw": encoded,
-        "threadId": thread_id,
-    });
-
-    run_gws(&[
-        "gmail",
-        "users",
-        "messages",
-        "send",
-        "--params",
-        r#"{"userId":"me"}"#,
-        "--json",
-        &send_json.to_string(),
-    ])
+        Some(&message_id_header),
+        Some(&references),
+        Some(&thread_id),
+    )
     .await?;
 
-    tracing::info!("Gmail: sent reply to {} in thread {}", sender_email, thread_id);
+    tracing::info!("Gmail: sent reply in thread {}", thread_id);
 
-    state.record_reply(&thread_id, &sender_email);
+    state.record_reply(&thread_id);
 
     Ok(())
 }
@@ -419,69 +411,9 @@ fn decode_base64url(data: &str) -> Option<String> {
         .and_then(|bytes| String::from_utf8(bytes).ok())
 }
 
-fn parse_email_address(from: &str) -> String {
-    // "Display Name <user@example.com>" -> "user@example.com"
-    if let Some(start) = from.rfind('<') {
-        if let Some(end) = from[start..].find('>') {
-            return from[start + 1..start + end].to_lowercase();
-        }
-    }
-    // Bare email address
-    from.trim().to_lowercase()
-}
-
-fn compose_reply_raw(
-    our_email: &str,
-    to: &str,
-    subject: &str,
-    in_reply_to: &str,
-    references: &str,
-    body: &str,
-) -> String {
-    let mut headers = format!(
-        "From: {}\r\nTo: {}\r\nSubject: {}\r\n",
-        our_email, to, subject
-    );
-
-    if !in_reply_to.is_empty() {
-        headers.push_str(&format!("In-Reply-To: {}\r\n", in_reply_to));
-
-        // Build References: original references + the message we're replying to
-        let refs = if references.is_empty() {
-            in_reply_to.to_string()
-        } else {
-            format!("{} {}", references, in_reply_to)
-        };
-        headers.push_str(&format!("References: {}\r\n", refs));
-    }
-
-    headers.push_str("Content-Type: text/plain; charset=\"utf-8\"\r\n");
-    headers.push_str("MIME-Version: 1.0\r\n");
-    headers.push_str("\r\n");
-    headers.push_str(body);
-
-    headers
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_email_address() {
-        assert_eq!(
-            parse_email_address("John Doe <john@example.com>"),
-            "john@example.com"
-        );
-        assert_eq!(
-            parse_email_address("jane@example.com"),
-            "jane@example.com"
-        );
-        assert_eq!(
-            parse_email_address("<BOB@Example.COM>"),
-            "bob@example.com"
-        );
-    }
 
     #[test]
     fn test_extract_header() {
@@ -502,43 +434,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compose_reply_raw() {
-        let raw = compose_reply_raw(
-            "me@example.com",
-            "them@example.com",
-            "Re: Hello",
-            "<abc@mail>",
-            "",
-            "Thanks for your email!",
-        );
-
-        assert!(raw.contains("From: me@example.com\r\n"));
-        assert!(raw.contains("To: them@example.com\r\n"));
-        assert!(raw.contains("In-Reply-To: <abc@mail>\r\n"));
-        assert!(raw.contains("References: <abc@mail>\r\n"));
-        assert!(raw.contains("Thanks for your email!"));
-    }
-
-    #[test]
-    fn test_compose_reply_with_existing_references() {
-        let raw = compose_reply_raw(
-            "me@example.com",
-            "them@example.com",
-            "Re: Hello",
-            "<def@mail>",
-            "<abc@mail>",
-            "body",
-        );
-
-        assert!(raw.contains("References: <abc@mail> <def@mail>\r\n"));
-    }
-
-    #[test]
     fn test_rate_limit() {
         let mut state = GmailState::default();
         assert!(!state.is_rate_limited("thread1", 300));
 
-        state.record_reply("thread1", "test@example.com");
+        state.record_reply("thread1");
         assert!(state.is_rate_limited("thread1", 300));
         assert!(!state.is_rate_limited("thread2", 300));
     }

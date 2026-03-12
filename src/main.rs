@@ -2,6 +2,7 @@ mod agent;
 mod client;
 mod config;
 mod daemon;
+mod email;
 mod gmail;
 mod llm;
 mod memories;
@@ -83,12 +84,13 @@ async fn main() -> Result<()> {
 
             let llm_backend = create_llm_backend(&config);
 
+            let db_path = config::data_dir().join("openferris.db");
+
             let mut tool_registry = tools::ToolRegistry::new();
             tool_registry.register_defaults(&config);
+            tool_registry.register_db_tools(db_path.clone(), &config);
 
             let agent = agent::Agent::new(llm_backend, tool_registry, soul);
-
-            let db_path = config::data_dir().join("openferris.db");
             let storage = storage::Storage::open(&db_path)?;
             tracing::info!("Storage opened at {}", db_path.display());
 
