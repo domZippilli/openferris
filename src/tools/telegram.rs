@@ -156,7 +156,20 @@ fn markdown_to_html(text: &str) -> String {
             }
         }
 
-        // *bold*
+        // **bold** (standard markdown — must check before single *)
+        if c == '*' && i + 1 < len && chars[i + 1] == '*' {
+            if let Some(end) = find_double_closing(&chars, i + 2, '*') {
+                result.push_str("<b>");
+                for j in (i + 2)..end {
+                    result.push(chars[j]);
+                }
+                result.push_str("</b>");
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // *bold* (single asterisk — Telegram convention)
         if c == '*' {
             if let Some(end) = find_closing(&chars, i + 1, '*') {
                 result.push_str("<b>");
@@ -169,7 +182,20 @@ fn markdown_to_html(text: &str) -> String {
             }
         }
 
-        // _italic_
+        // __italic__ (standard markdown — must check before single _)
+        if c == '_' && i + 1 < len && chars[i + 1] == '_' {
+            if let Some(end) = find_double_closing(&chars, i + 2, '_') {
+                result.push_str("<i>");
+                for j in (i + 2)..end {
+                    result.push(chars[j]);
+                }
+                result.push_str("</i>");
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // _italic_ (single underscore)
         if c == '_' {
             if let Some(end) = find_closing(&chars, i + 1, '_') {
                 result.push_str("<i>");
@@ -228,6 +254,26 @@ fn find_markdown_link(chars: &[char], start: usize) -> Option<(usize, usize, usi
     Some((text_end, url_start, k))
 }
 
+/// Find the position of a closing double delimiter (e.g. ** or __).
+/// Returns the index of the first char of the closing pair.
+fn find_double_closing(chars: &[char], start: usize, delim: char) -> Option<usize> {
+    if start >= chars.len() {
+        return None;
+    }
+    for j in start..chars.len() - 1 {
+        if chars[j] == '\n' {
+            return None;
+        }
+        if chars[j] == delim && chars[j + 1] == delim {
+            if j == start {
+                return None; // empty span
+            }
+            return Some(j);
+        }
+    }
+    None
+}
+
 /// Find the position of a closing delimiter, ensuring it's not immediately after the opener
 /// (to avoid matching empty spans like ** or __) and doesn't span across newlines
 /// (to avoid matching unrelated markers).
@@ -284,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bold() {
+    fn test_bold_single() {
         assert_eq!(
             markdown_to_html("This is *bold* text"),
             "This is <b>bold</b> text"
@@ -292,9 +338,25 @@ mod tests {
     }
 
     #[test]
-    fn test_italic() {
+    fn test_bold_double() {
+        assert_eq!(
+            markdown_to_html("This is **bold** text"),
+            "This is <b>bold</b> text"
+        );
+    }
+
+    #[test]
+    fn test_italic_single() {
         assert_eq!(
             markdown_to_html("This is _italic_ text"),
+            "This is <i>italic</i> text"
+        );
+    }
+
+    #[test]
+    fn test_italic_double() {
+        assert_eq!(
+            markdown_to_html("This is __italic__ text"),
             "This is <i>italic</i> text"
         );
     }
@@ -396,5 +458,12 @@ mod tests {
             markdown_to_html("array[0] is the first element"),
             "array[0] is the first element"
         );
+    }
+
+    #[test]
+    fn test_headline_format() {
+        let input = "**Top Stories**\n\n- [Headline one](https://example.com/1) — AP News\n- [Headline two](https://example.com/2) — BBC";
+        let expected = "<b>Top Stories</b>\n\n- <a href=\"https://example.com/1\">Headline one</a> — AP News\n- <a href=\"https://example.com/2\">Headline two</a> — BBC";
+        assert_eq!(markdown_to_html(input), expected);
     }
 }
