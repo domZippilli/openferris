@@ -27,7 +27,7 @@ impl Tool for SendTelegramTool {
         "Send a message via Telegram. \
          Parameters: {\"message\": \"<text>\", \"chat_id\": <optional number>}. \
          If chat_id is omitted, the message is sent to the default configured chat. \
-         Write your message as plain text with simple markdown: *bold*, _italic_, `code`, ```code blocks```. \
+         Write your message as plain text with simple markdown: *bold*, _italic_, `code`, ```code blocks```, [link text](url). \
          Formatting is handled automatically — just write naturally. \
          Use this to deliver results, notifications, or replies to the user via Telegram."
     }
@@ -139,6 +139,23 @@ fn markdown_to_html(text: &str) -> String {
             }
         }
 
+        // [text](url) links
+        if c == '[' {
+            if let Some((text_end, url_start, url_end)) = find_markdown_link(&chars, i) {
+                result.push_str("<a href=\"");
+                for j in url_start..url_end {
+                    result.push(chars[j]);
+                }
+                result.push_str("\">");
+                for j in (i + 1)..text_end {
+                    result.push(chars[j]);
+                }
+                result.push_str("</a>");
+                i = url_end + 1; // skip past closing ')'
+                continue;
+            }
+        }
+
         // *bold*
         if c == '*' {
             if let Some(end) = find_closing(&chars, i + 1, '*') {
@@ -170,6 +187,45 @@ fn markdown_to_html(text: &str) -> String {
     }
 
     result
+}
+
+/// Parse a markdown link starting at `[` at position `start`.
+/// Returns (text_end, url_start, url_end) where:
+///   - text is chars[start+1..text_end]
+///   - url is chars[url_start..url_end]
+///   - the closing `)` is at url_end
+fn find_markdown_link(chars: &[char], start: usize) -> Option<(usize, usize, usize)> {
+    // Find closing ]
+    let mut j = start + 1;
+    while j < chars.len() && chars[j] != ']' && chars[j] != '\n' {
+        j += 1;
+    }
+    if j >= chars.len() || chars[j] != ']' {
+        return None;
+    }
+    let text_end = j;
+
+    // Must be immediately followed by (
+    if text_end + 1 >= chars.len() || chars[text_end + 1] != '(' {
+        return None;
+    }
+    let url_start = text_end + 2;
+
+    // Find closing )
+    let mut k = url_start;
+    while k < chars.len() && chars[k] != ')' && chars[k] != '\n' {
+        k += 1;
+    }
+    if k >= chars.len() || chars[k] != ')' {
+        return None;
+    }
+
+    // Don't match empty text or empty url
+    if text_end == start + 1 || k == url_start {
+        return None;
+    }
+
+    Some((text_end, url_start, k))
 }
 
 /// Find the position of a closing delimiter, ensuring it's not immediately after the opener
@@ -306,5 +362,39 @@ mod tests {
         let input = "*Summary*\n\n3 meetings (9am, 11am, 2pm).\nReview PR #42.\nScore: 8/10.";
         let expected = "<b>Summary</b>\n\n3 meetings (9am, 11am, 2pm).\nReview PR #42.\nScore: 8/10.";
         assert_eq!(markdown_to_html(input), expected);
+    }
+
+    #[test]
+    fn test_link() {
+        assert_eq!(
+            markdown_to_html("[Click here](https://example.com)"),
+            r#"<a href="https://example.com">Click here</a>"#
+        );
+    }
+
+    #[test]
+    fn test_link_with_special_url() {
+        assert_eq!(
+            markdown_to_html("[News](https://news.google.com/rss/articles/ABC_def-ghi)"),
+            r#"<a href="https://news.google.com/rss/articles/ABC_def-ghi">News</a>"#
+        );
+    }
+
+    #[test]
+    fn test_link_with_bold_text() {
+        // Bold inside link text isn't supported; use link + bold separately
+        assert_eq!(
+            markdown_to_html("[Headline](https://example.com) — *Source*"),
+            r#"<a href="https://example.com">Headline</a> — <b>Source</b>"#
+        );
+    }
+
+    #[test]
+    fn test_bare_brackets_passthrough() {
+        // Brackets without (url) should pass through
+        assert_eq!(
+            markdown_to_html("array[0] is the first element"),
+            "array[0] is the first element"
+        );
     }
 }
