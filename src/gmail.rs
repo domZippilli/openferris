@@ -298,6 +298,7 @@ async fn process_message(
     );
 
     tracing::info!("Gmail: processing email from {} re: {}", sender_email, subject);
+    tracing::debug!("Gmail message body: {}", body);
 
     // Send to daemon
     let request = DaemonRequest {

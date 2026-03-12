@@ -159,6 +159,8 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                             }
                         };
 
+                        tracing::debug!("Daemon request from {}: {:?}", addr, request.kind);
+
                         let is_freeform =
                             matches!(request.kind, RequestKind::FreeformMessage { .. });
                         let user_text = match &request.kind {

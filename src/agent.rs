@@ -57,6 +57,7 @@ impl Agent {
             tracing::debug!("Agent iteration {}", iteration + 1);
 
             let response = self.llm.chat_completion(&messages).await?;
+            tracing::debug!("LLM response: {}", response);
             let tool_calls = parse_tool_calls(&response);
 
             if tool_calls.is_empty() {
@@ -78,6 +79,7 @@ impl Agent {
             // Execute each tool call and feed results back
             for call in &tool_calls {
                 tracing::info!("Tool call: {}", call.name);
+                tracing::debug!("Tool params: {} {}", call.name, call.params);
                 let result = match self
                     .tools
                     .execute(&call.name, call.params.clone(), &skill.tools)
