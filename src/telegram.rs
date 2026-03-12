@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use openferris::config::TelegramConfig;
+use openferris::protocol::{DaemonRequest, RequestKind};
+
 use crate::client;
-use crate::config::TelegramConfig;
-use crate::protocol::{DaemonRequest, RequestKind};
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 

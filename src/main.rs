@@ -1,18 +1,11 @@
-mod agent;
 mod client;
-mod config;
 mod daemon;
-mod email;
 mod gmail;
-mod llm;
 mod memories;
-mod protocol;
-mod schedule;
-mod skills;
-mod storage;
 mod telegram;
-mod tools;
 mod tui;
+
+use openferris::{agent, config, llm, schedule, skills, storage, tools};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -60,6 +53,14 @@ enum Commands {
     /// Manage scheduled skill invocations via cron
     #[command(subcommand)]
     Schedule(ScheduleCommand),
+    /// Run a prompt through the real agent and print the full trace
+    TestAgent {
+        /// Prompt to send to the agent
+        prompt: String,
+        /// Skill to use
+        #[arg(long, default_value = "default")]
+        skill: String,
+    },
     /// Clear interaction history and/or memories
     Forget {
         /// Time window to clear: "1h", "24h", "7d", "30d", or "all"
@@ -73,9 +74,20 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     let cli = Cli::parse();
+
+    // Default to debug-level logging for test-agent, info for everything else.
+    let default_filter = match &cli.command {
+        Commands::TestAgent { .. } => "openferris=debug",
+        _ => "openferris=info",
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| default_filter.parse().unwrap()),
+        )
+        .init();
+
     let config = config::load_config()?;
 
     match cli.command {
@@ -129,6 +141,35 @@ async fn main() -> Result<()> {
                     )
                 })?;
             gmail::run(config.daemon.listen.clone(), gmail_config).await?;
+        }
+        Commands::TestAgent { prompt, skill } => {
+            let soul = config::load_soul()?;
+            let identity = config::load_identity();
+            let user_profile = config::load_user();
+            let llm_backend = create_llm_backend(&config);
+
+            let db_path = config::data_dir().join("openferris.db");
+
+            let mut tool_registry = tools::ToolRegistry::new();
+            tool_registry.register_defaults(&config);
+            tool_registry.register_db_tools(db_path, &config);
+
+            let skills_dir = config::config_dir().join("skills");
+            let skill = skills::load_skill(&skill, &skills_dir)?;
+
+            let agent = agent::Agent::new(llm_backend, tool_registry, soul);
+            let result = agent
+                .run(&skill, &prompt, &[], &identity, &user_profile, "")
+                .await?;
+
+            println!("=== RESPONSE ===");
+            println!("{}", result.response);
+            if !result.memories.is_empty() {
+                println!("\n=== MEMORIES ===");
+                for mem in &result.memories {
+                    println!("  - {}", mem);
+                }
+            }
         }
         Commands::Run { skill_name } => {
             let result = client::send_skill(&config.daemon.listen, &skill_name).await?;

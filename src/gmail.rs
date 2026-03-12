@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use openferris::config::GmailConfig;
+use openferris::email;
+use openferris::protocol::{DaemonRequest, RequestKind};
+use openferris::storage::Storage;
+
 use crate::client;
-use crate::config::GmailConfig;
-use crate::email;
-use crate::protocol::{DaemonRequest, RequestKind};
-use crate::storage::Storage;
 
 /// Maximum email body length sent to the daemon (chars).
 const MAX_BODY_LEN: usize = 4000;
@@ -26,7 +27,7 @@ struct GmailState {
 
 impl GmailState {
     fn path() -> PathBuf {
-        crate::config::data_dir().join("gmail_state.json")
+        openferris::config::data_dir().join("gmail_state.json")
     }
 
     fn load() -> Self {
@@ -76,7 +77,7 @@ impl GmailState {
 pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()> {
     let mut state = GmailState::load();
 
-    let db_path = crate::config::data_dir().join("openferris.db");
+    let db_path = openferris::config::data_dir().join("openferris.db");
     let storage = Storage::open(&db_path)?;
 
     tracing::info!("Gmail listener starting...");

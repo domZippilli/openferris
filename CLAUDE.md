@@ -21,7 +21,21 @@ cargo fmt -- --check     # Check formatting without modifying
 
 ## Architecture
 
-This is a binary crate (`src/main.rs` entry point). The project is in its early stages — structure will evolve as features are added.
+The project uses a lib+binary crate split. Core modules (agent, config, llm, tools, skills, etc.) live in `src/lib.rs` and are importable by integration tests. Binary-only modules (daemon, telegram, gmail, tui, client, memories) live in `src/main.rs` and use `openferris::` to reference lib modules.
+
+### Testing the Agent
+
+```bash
+# Run deterministic integration tests (MockLlm, no real LLM needed)
+cargo test --test agent_integration
+
+# Run a prompt through the real agent with full debug trace
+cargo run -- test-agent "What time is it?"
+cargo run -- test-agent --skill daily-briefing "Run the briefing"
+
+# test-agent defaults to debug-level logging; override with RUST_LOG
+RUST_LOG=trace cargo run -- test-agent "Hello"
+```
 
 ## Rust Edition
 

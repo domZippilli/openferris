@@ -5,13 +5,14 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::agent::{Agent, AgentResult};
-use crate::config::{self, AppConfig};
-use crate::llm::{ChatMessage, Role};
+use openferris::agent::{Agent, AgentResult};
+use openferris::config::{self, AppConfig};
+use openferris::llm::{ChatMessage, Role};
+use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
+use openferris::skills;
+use openferris::storage::Storage;
+
 use crate::memories::Memories;
-use crate::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
-use crate::skills;
-use crate::storage::Storage;
 
 struct QueuedRequest {
     request: DaemonRequest,

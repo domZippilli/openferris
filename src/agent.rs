@@ -6,7 +6,7 @@ use crate::tools::ToolRegistry;
 
 const MAX_ITERATIONS: usize = 20;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AgentResult {
     /// The response text to show the user (memory tags stripped).
     pub response: String,

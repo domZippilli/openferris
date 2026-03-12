@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-use crate::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
+use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
 
 pub async fn send_skill(address: &str, skill_name: &str) -> Result<String> {
     let request = DaemonRequest {

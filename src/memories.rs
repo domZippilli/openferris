@@ -14,7 +14,7 @@ impl Memories {
 
     /// Default location: ~/.local/share/openferris/MEMORIES.md
     pub fn default_path() -> PathBuf {
-        crate::config::data_dir().join("MEMORIES.md")
+        openferris::config::data_dir().join("MEMORIES.md")
     }
 
     /// Append a memory with today's date.

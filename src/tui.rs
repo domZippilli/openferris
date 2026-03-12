@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 
-use crate::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
+use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
 
 pub async fn run(address: &str) -> Result<()> {
     let stream = TcpStream::connect(address)
