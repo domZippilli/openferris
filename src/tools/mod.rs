@@ -1,6 +1,7 @@
 pub mod datetime;
 pub mod files;
 pub mod gws;
+pub mod run_skill;
 pub mod schedule;
 pub mod send_email;
 pub mod telegram;

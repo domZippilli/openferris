@@ -9,6 +9,7 @@ pub struct LlamaCppBackend {
     client: Client,
     endpoint: String,
     model: Option<String>,
+    slot: i32,
 }
 
 #[derive(Serialize)]
@@ -42,7 +43,7 @@ struct ResponseMessage {
 }
 
 impl LlamaCppBackend {
-    pub fn new(endpoint: String, model: Option<String>) -> Self {
+    pub fn new(endpoint: String, model: Option<String>, slot: i32) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -52,6 +53,7 @@ impl LlamaCppBackend {
             client,
             endpoint,
             model,
+            slot,
         }
     }
 }
@@ -70,7 +72,7 @@ impl LlmBackend for LlamaCppBackend {
         let request = ChatRequest {
             model: self.model.clone().unwrap_or_else(|| "default".to_string()),
             messages: api_messages,
-            id_slot: Some(0),
+            id_slot: Some(self.slot),
         };
 
         let url = format!(

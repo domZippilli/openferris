@@ -94,13 +94,26 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let soul = config::load_soul()?;
 
-            let llm_backend = create_llm_backend(&config);
+            let llm_backend = create_llm_backend(&config, 0);
 
             let db_path = config::data_dir().join("openferris.db");
 
             let mut tool_registry = tools::ToolRegistry::new();
             tool_registry.register_defaults(&config);
             tool_registry.register_db_tools(db_path.clone(), &config);
+
+            if config.llm.parallel_slots > 1 {
+                let skills_dir = config::config_dir().join("skills");
+                tool_registry.register(Box::new(tools::run_skill::RunSkillTool::new(
+                    config.llm.clone(),
+                    config.clone(),
+                    soul.clone(),
+                    config::load_identity(),
+                    config::load_user(),
+                    skills_dir,
+                    db_path.clone(),
+                )));
+            }
 
             let agent = agent::Agent::new(llm_backend, tool_registry, soul);
             let storage = storage::Storage::open(&db_path)?;
@@ -146,15 +159,28 @@ async fn main() -> Result<()> {
             let soul = config::load_soul()?;
             let identity = config::load_identity();
             let user_profile = config::load_user();
-            let llm_backend = create_llm_backend(&config);
+            let llm_backend = create_llm_backend(&config, 0);
 
             let db_path = config::data_dir().join("openferris.db");
 
             let mut tool_registry = tools::ToolRegistry::new();
             tool_registry.register_defaults(&config);
-            tool_registry.register_db_tools(db_path, &config);
+            tool_registry.register_db_tools(db_path.clone(), &config);
 
             let skills_dir = config::config_dir().join("skills");
+
+            if config.llm.parallel_slots > 1 {
+                tool_registry.register(Box::new(tools::run_skill::RunSkillTool::new(
+                    config.llm.clone(),
+                    config.clone(),
+                    soul.clone(),
+                    identity.clone(),
+                    user_profile.clone(),
+                    skills_dir.clone(),
+                    db_path,
+                )));
+            }
+
             let skill = skills::load_skill(&skill, &skills_dir)?;
 
             let agent = agent::Agent::new(llm_backend, tool_registry, soul);
@@ -303,17 +329,19 @@ fn schedule_command(cmd: ScheduleCommand) -> Result<()> {
     Ok(())
 }
 
-fn create_llm_backend(config: &config::AppConfig) -> Box<dyn llm::LlmBackend> {
+fn create_llm_backend(config: &config::AppConfig, slot: i32) -> Box<dyn llm::LlmBackend> {
     match config.llm.backend.as_str() {
         "llamacpp" => Box::new(llm::llamacpp::LlamaCppBackend::new(
             config.llm.endpoint.clone(),
             config.llm.model.clone(),
+            slot,
         )),
         other => {
             tracing::warn!("Unknown LLM backend '{}', defaulting to llamacpp", other);
             Box::new(llm::llamacpp::LlamaCppBackend::new(
                 config.llm.endpoint.clone(),
                 config.llm.model.clone(),
+                slot,
             ))
         }
     }

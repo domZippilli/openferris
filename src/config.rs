@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub user: UserConfig,
     pub llm: LlmConfig,
@@ -14,7 +14,7 @@ pub struct AppConfig {
     pub gmail: Option<GmailConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct UserConfig {
     #[serde(default = "default_timezone")]
     pub timezone: String,
@@ -25,19 +25,27 @@ fn default_timezone() -> String {
     "UTC".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LlmConfig {
     #[serde(default = "default_backend")]
     pub backend: String,
     pub endpoint: String,
     pub model: Option<String>,
+    /// Number of parallel slots on the llama.cpp server.
+    /// Set >1 to enable subagent support (parent uses slot 0, subagents use 1+).
+    #[serde(default = "default_parallel_slots")]
+    pub parallel_slots: u32,
 }
 
 fn default_backend() -> String {
     "llamacpp".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+fn default_parallel_slots() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
