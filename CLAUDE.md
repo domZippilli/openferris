@@ -37,6 +37,10 @@ cargo run -- test-agent --skill daily-briefing "Run the briefing"
 RUST_LOG=trace cargo run -- test-agent "Hello"
 ```
 
+## Agent Workspace
+
+The agent's workspace is at `~/.local/share/openferris/workspace/`. When making changes that affect the agent's tools or capabilities, update `workspace/RELEASE_NOTES.md` so the agent can stay current. The agent reads these notes via the default skill prompt.
+
 ## Rust Edition
 
 Uses Rust **2024 edition** (rustc 1.93+). This means newer language features and the 2024 edition's updated defaults are available.

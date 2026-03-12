@@ -25,11 +25,10 @@ impl Tool for SendTelegramTool {
 
     fn description_for_llm(&self) -> &str {
         "Send a message via Telegram. \
-         Parameters: {\"message\": \"<text>\", \"parse_mode\": \"<optional: MarkdownV2 or HTML>\", \"chat_id\": <optional number>}. \
+         Parameters: {\"message\": \"<text>\", \"chat_id\": <optional number>}. \
          If chat_id is omitted, the message is sent to the default configured chat. \
-         parse_mode enables formatting: use \"MarkdownV2\" for *bold*, _italic_, `code`, ```code blocks```. \
-         Special characters are auto-escaped for MarkdownV2 — just write naturally with formatting markers. \
-         Or use \"HTML\" for <b>bold</b>, <i>italic</i>, <code>code</code>. If omitted, plain text is sent. \
+         Write your message as plain text with simple markdown: *bold*, _italic_, `code`, ```code blocks```. \
+         Formatting is handled automatically — just write naturally. \
          Use this to deliver results, notifications, or replies to the user via Telegram."
     }
 
@@ -49,33 +48,20 @@ impl Tool for SendTelegramTool {
                 )
             })?;
 
-        let parse_mode = params
-            .get("parse_mode")
-            .and_then(|v| v.as_str())
-            .filter(|m| *m == "MarkdownV2" || *m == "HTML");
-
-        // Auto-escape MarkdownV2 special characters so the agent doesn't have to
-        let message = if parse_mode == Some("MarkdownV2") {
-            escape_markdownv2(message)
-        } else {
-            message.to_string()
-        };
+        let html = markdown_to_html(message);
 
         let base_url = format!("https://api.telegram.org/bot{}", self.bot_token);
-
         let client = reqwest::Client::new();
 
         // Telegram has a 4096 char limit per message
-        let chunks = chunk_message(&message, 4096);
+        let chunks = chunk_message(&html, 4096);
 
         for chunk in &chunks {
-            let mut body = serde_json::json!({
+            let body = serde_json::json!({
                 "chat_id": chat_id,
                 "text": chunk,
+                "parse_mode": "HTML",
             });
-            if let Some(mode) = parse_mode {
-                body["parse_mode"] = serde_json::json!(mode);
-            }
 
             let resp = client
                 .post(format!("{}/sendMessage", base_url))
@@ -97,16 +83,13 @@ impl Tool for SendTelegramTool {
     }
 }
 
-/// Escape MarkdownV2 special characters, preserving intentional formatting.
+/// Convert simple markdown to Telegram-compatible HTML.
 ///
-/// Telegram requires escaping: _ * [ ] ( ) ~ ` > # + - = | { } . !
-/// We preserve paired formatting markers: *bold*, _italic_, `code`, ```blocks```
-/// Everything else gets escaped.
-fn escape_markdownv2(text: &str) -> String {
-    // Characters that must be escaped in MarkdownV2 outside of formatting
-    const SPECIAL: &[char] = &[
-        '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
-    ];
+/// Handles: *bold* → <b>, _italic_ → <i>, `code` → <code>, ```blocks``` → <pre>.
+/// HTML entities (<, >, &) are escaped first so arbitrary text is safe.
+fn markdown_to_html(text: &str) -> String {
+    // Step 1: escape HTML entities
+    let text = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
 
     let mut result = String::with_capacity(text.len() * 2);
     let chars: Vec<char> = text.chars().collect();
@@ -116,48 +99,70 @@ fn escape_markdownv2(text: &str) -> String {
     while i < len {
         let c = chars[i];
 
-        // Preserve ``` code blocks ```
+        // ``` code blocks ```
         if c == '`' && i + 2 < len && chars[i + 1] == '`' && chars[i + 2] == '`' {
-            result.push_str("```");
             i += 3;
-            // Copy everything until closing ```
+            // Skip optional language tag and newline after opening ```
+            while i < len && chars[i] != '\n' && chars[i] != '`' {
+                i += 1;
+            }
+            if i < len && chars[i] == '\n' {
+                i += 1;
+            }
+            result.push_str("<pre>");
             while i < len {
                 if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-                    result.push_str("```");
                     i += 3;
                     break;
                 }
                 result.push(chars[i]);
                 i += 1;
             }
+            // Trim trailing newline inside <pre>
+            if result.ends_with('\n') {
+                result.pop();
+            }
+            result.push_str("</pre>");
             continue;
         }
 
-        // Preserve `inline code`
+        // `inline code`
         if c == '`' {
-            result.push('`');
-            i += 1;
-            while i < len && chars[i] != '`' {
-                result.push(chars[i]);
-                i += 1;
+            if let Some(end) = find_closing(&chars, i + 1, '`') {
+                result.push_str("<code>");
+                for j in (i + 1)..end {
+                    result.push(chars[j]);
+                }
+                result.push_str("</code>");
+                i = end + 1;
+                continue;
             }
-            if i < len {
-                result.push('`');
-                i += 1;
-            }
-            continue;
         }
 
-        // Preserve *bold* and _italic_ — pass through the marker chars
-        if (c == '*' || c == '_') && i + 1 < len {
-            result.push(c);
-            i += 1;
-            continue;
+        // *bold*
+        if c == '*' {
+            if let Some(end) = find_closing(&chars, i + 1, '*') {
+                result.push_str("<b>");
+                for j in (i + 1)..end {
+                    result.push(chars[j]);
+                }
+                result.push_str("</b>");
+                i = end + 1;
+                continue;
+            }
         }
 
-        // Escape special characters
-        if SPECIAL.contains(&c) {
-            result.push('\\');
+        // _italic_
+        if c == '_' {
+            if let Some(end) = find_closing(&chars, i + 1, '_') {
+                result.push_str("<i>");
+                for j in (i + 1)..end {
+                    result.push(chars[j]);
+                }
+                result.push_str("</i>");
+                i = end + 1;
+                continue;
+            }
         }
 
         result.push(c);
@@ -165,6 +170,24 @@ fn escape_markdownv2(text: &str) -> String {
     }
 
     result
+}
+
+/// Find the position of a closing delimiter, ensuring it's not immediately after the opener
+/// (to avoid matching empty spans like ** or __) and doesn't span across newlines
+/// (to avoid matching unrelated markers).
+fn find_closing(chars: &[char], start: usize, delim: char) -> Option<usize> {
+    if start >= chars.len() || chars[start] == delim {
+        return None; // empty span
+    }
+    for j in start..chars.len() {
+        if chars[j] == '\n' {
+            return None; // don't span lines
+        }
+        if chars[j] == delim {
+            return Some(j);
+        }
+    }
+    None
 }
 
 fn chunk_message(text: &str, max_len: usize) -> Vec<&str> {
@@ -197,42 +220,91 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_escape_special_chars() {
+    fn test_plain_text_passthrough() {
         assert_eq!(
-            escape_markdownv2("Check out https://example.com/path.html"),
-            "Check out https://example\\.com/path\\.html"
+            markdown_to_html("Hello, world!"),
+            "Hello, world!"
         );
     }
 
     #[test]
-    fn test_preserve_bold_italic() {
+    fn test_bold() {
         assert_eq!(
-            escape_markdownv2("*bold* and _italic_"),
-            "*bold* and _italic_"
+            markdown_to_html("This is *bold* text"),
+            "This is <b>bold</b> text"
         );
     }
 
     #[test]
-    fn test_preserve_inline_code() {
+    fn test_italic() {
         assert_eq!(
-            escape_markdownv2("run `ls -la` now"),
-            "run `ls -la` now"
+            markdown_to_html("This is _italic_ text"),
+            "This is <i>italic</i> text"
         );
     }
 
     #[test]
-    fn test_preserve_code_block() {
+    fn test_inline_code() {
         assert_eq!(
-            escape_markdownv2("```\ncode.here()\n```"),
-            "```\ncode.here()\n```"
+            markdown_to_html("Run `ls -la` now"),
+            "Run <code>ls -la</code> now"
         );
     }
 
     #[test]
-    fn test_escape_mixed() {
+    fn test_code_block() {
         assert_eq!(
-            escape_markdownv2("Hello! Score: 5-3 (win)"),
-            "Hello\\! Score: 5\\-3 \\(win\\)"
+            markdown_to_html("```\ncode.here()\n```"),
+            "<pre>code.here()</pre>"
         );
+    }
+
+    #[test]
+    fn test_code_block_with_language() {
+        assert_eq!(
+            markdown_to_html("```rust\nfn main() {}\n```"),
+            "<pre>fn main() {}</pre>"
+        );
+    }
+
+    #[test]
+    fn test_html_entities_escaped() {
+        assert_eq!(
+            markdown_to_html("if x < 10 && y > 5"),
+            "if x &lt; 10 &amp;&amp; y &gt; 5"
+        );
+    }
+
+    #[test]
+    fn test_special_chars_passthrough() {
+        // Characters that were problematic with MarkdownV2 should just work
+        assert_eq!(
+            markdown_to_html("Hello! Score: 5-3 (win)"),
+            "Hello! Score: 5-3 (win)"
+        );
+    }
+
+    #[test]
+    fn test_mixed_formatting() {
+        assert_eq!(
+            markdown_to_html("*Bold* and _italic_ and `code`"),
+            "<b>Bold</b> and <i>italic</i> and <code>code</code>"
+        );
+    }
+
+    #[test]
+    fn test_unpaired_markers_passthrough() {
+        // A lone * or _ without a closing pair should pass through as-is
+        assert_eq!(
+            markdown_to_html("5 * 3 = 15"),
+            "5 * 3 = 15"
+        );
+    }
+
+    #[test]
+    fn test_complex_message() {
+        let input = "*Summary*\n\n3 meetings (9am, 11am, 2pm).\nReview PR #42.\nScore: 8/10.";
+        let expected = "<b>Summary</b>\n\n3 meetings (9am, 11am, 2pm).\nReview PR #42.\nScore: 8/10.";
+        assert_eq!(markdown_to_html(input), expected);
     }
 }

@@ -20,7 +20,9 @@ If you need the current date or time, use the datetime tool.
 You can read and write files in the user's allowed directories.
 Otherwise, respond directly with your best answer.
 
-## Creating Skills
+## Workspace
+
+Your workspace is at `~/.local/share/openferris/workspace/`. Check `workspace/RELEASE_NOTES.md` for recent platform changes that affect your tools and skills.
 
 You can create new skills by writing SKILL.md files to your workspace. Read the guide at `workspace/skills/README.md` for the format and examples. Skills you create are available immediately via `openferris run <skill-name>` or cron scheduling.
 
