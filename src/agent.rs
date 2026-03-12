@@ -188,7 +188,21 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
         if let Some(rel_end) = text[after_tag..].find("</tool_call>") {
             let inner = text[after_tag..after_tag + rel_end].trim();
 
-            match serde_json::from_str::<serde_json::Value>(inner) {
+            // Try parsing as-is first, then attempt to repair truncated JSON
+            // by appending closing braces. LLMs sometimes drop trailing `}`.
+            let parsed = serde_json::from_str::<serde_json::Value>(inner)
+                .or_else(|_| {
+                    let mut fixed = inner.to_string();
+                    fixed.push('}');
+                    serde_json::from_str::<serde_json::Value>(&fixed)
+                })
+                .or_else(|_| {
+                    let mut fixed = inner.to_string();
+                    fixed.push_str("}}");
+                    serde_json::from_str::<serde_json::Value>(&fixed)
+                });
+
+            match parsed {
                 Ok(parsed) => {
                     let name = parsed
                         .get("function")
@@ -203,7 +217,7 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
                     if !name.is_empty() {
                         calls.push(ToolCall { name, params });
                     } else {
-                        tracing::warn!("Tool call block has no 'tool' field: {}", inner);
+                        tracing::warn!("Tool call block has no 'function' field: {}", inner);
                     }
                 }
                 Err(e) => {
@@ -333,5 +347,25 @@ mod tests {
         let text = "Just a normal response.";
         assert!(parse_memories(text).is_empty());
         assert_eq!(strip_tags(text), "Just a normal response.");
+    }
+
+    #[test]
+    fn test_parse_tool_call_missing_one_brace() {
+        let text = r#"<tool_call>
+{"function": "send_telegram", "parameters": {"message": "hello"}
+</tool_call>"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "send_telegram");
+    }
+
+    #[test]
+    fn test_parse_tool_call_missing_two_braces() {
+        let text = r#"<tool_call>
+{"function": "send_telegram", "parameters": {"message": "hello"
+</tool_call>"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "send_telegram");
     }
 }
