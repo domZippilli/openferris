@@ -49,10 +49,11 @@ impl Tool for RunSkillTool {
     }
 
     fn description_for_llm(&self) -> &str {
-        "Run a skill as a subagent. The skill runs with its own context and tools, and returns the result. \
+        "Run a skill as a subagent. The skill runs with its own context and tools, and returns the result as text. \
          Parameters: {\"skill_name\": \"<name>\", \"context\": \"<optional extra instructions or data>\"}. \
          Use this to delegate tasks to specialized skills like headline-scrape, daily-briefing, etc. \
-         The subagent has access to all the same tools (except run_skill) and will execute the skill's instructions."
+         The subagent does the work (fetching, parsing, formatting) and returns the result to you. \
+         You are then responsible for delivering the result (e.g. sending via Telegram)."
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
@@ -68,8 +69,10 @@ impl Tool for RunSkillTool {
 
         tracing::info!("Subagent starting: skill={}", skill_name);
 
-        // Load the skill
-        let skill = skills::load_skill(skill_name, &self.skills_dir)?;
+        // Load the skill and strip delivery tools — the parent handles delivery.
+        let mut skill = skills::load_skill(skill_name, &self.skills_dir)?;
+        const DELIVERY_TOOLS: &[&str] = &["send_telegram", "send_email"];
+        skill.tools.retain(|t| !DELIVERY_TOOLS.contains(&t.as_str()));
 
         // Create LLM backend on slot 1 (parent uses slot 0)
         let llm: Box<dyn crate::llm::LlmBackend> = Box::new(LlamaCppBackend::new(
@@ -85,9 +88,15 @@ impl Tool for RunSkillTool {
 
         let agent = Agent::new(llm, tools, self.soul.clone());
 
+        let base = format!(
+            "Execute the {} skill now. \
+             Do NOT send or deliver the result — just return the formatted output as your response. \
+             The caller will handle delivery.",
+            skill_name
+        );
         let msg = match &context {
-            Some(ctx) => format!("Execute the {} skill now.\n\n{}", skill_name, ctx),
-            None => format!("Execute the {} skill now.", skill_name),
+            Some(ctx) => format!("{}\n\n{}", base, ctx),
+            None => base,
         };
 
         let result = agent
