@@ -107,10 +107,24 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
     }
 
     let poll_interval = std::time::Duration::from_secs(gmail_config.poll_interval_secs);
+    let auth_backoff = std::time::Duration::from_secs(300); // 5 min backoff on auth errors
+    let mut auth_failed = false;
 
     loop {
         if let Err(e) = poll_once(&daemon_address, &gmail_config, &storage, &mut state, &our_email).await {
+            let err_str = format!("{:#}", e);
+            if err_str.contains("401") || err_str.contains("authError") || err_str.contains("invalid_grant") {
+                if !auth_failed {
+                    tracing::error!("Gmail authentication expired. Run `gws auth login` to re-authenticate.");
+                    auth_failed = true;
+                }
+                tokio::time::sleep(auth_backoff).await;
+                continue;
+            }
+            auth_failed = false;
             tracing::error!("Poll error: {:#}", e);
+        } else {
+            auth_failed = false;
         }
         tokio::time::sleep(poll_interval).await;
     }
