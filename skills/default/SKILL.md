@@ -12,6 +12,7 @@ tools:
   - send_email
   - gws
   - run_skill
+  - ask_claude
 ---
 
 You received a message from your human. Help them with whatever they need.
