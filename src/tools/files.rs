@@ -1,8 +1,29 @@
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use super::Tool;
+
+/// Normalize a path by resolving `.` and `..` components lexically (without
+/// touching the filesystem). This prevents traversal attacks that rely on
+/// `canonicalize` failing when intermediate directories do not exist.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => { /* skip `.` */ }
+            Component::ParentDir => {
+                // Pop the last component; if there is nothing to pop, keep the
+                // `..` only for relative paths (absolute paths just stay at root).
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
 
 /// Validates that a path resolves to somewhere within the allowed directories.
 /// Returns the canonicalized path if valid.
@@ -18,34 +39,72 @@ fn validate_path(path: &str, allowed_dirs: &[PathBuf]) -> Result<PathBuf> {
         requested
     };
 
-    // For writes, the file may not exist yet — canonicalize the parent
-    let check_path = if expanded.exists() {
-        expanded.canonicalize()?
+    // Make the path absolute before normalizing
+    let absolute = if expanded.is_absolute() {
+        expanded
     } else {
-        let parent = expanded
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Invalid path: {}", path))?;
-        if !parent.exists() {
-            // Parent doesn't exist yet either — use the absolute path for checking
-            if expanded.is_absolute() {
-                expanded.clone()
-            } else {
-                std::env::current_dir()?.join(&expanded)
-            }
-        } else {
-            parent.canonicalize()?.join(expanded.file_name().unwrap_or_default())
-        }
+        std::env::current_dir()?.join(&expanded)
     };
 
+    // First pass: normalize the path lexically to resolve `.` and `..` without
+    // requiring the path to exist on disk. This catches traversal attempts even
+    // when intermediate directories are missing.
+    let normalized = normalize_path(&absolute);
+
     for allowed in allowed_dirs {
-        // Ensure the allowed dir exists (create workspace on first use)
         if !allowed.exists() {
             std::fs::create_dir_all(allowed)?;
         }
         let allowed_canonical = allowed.canonicalize()?;
-        if check_path.starts_with(&allowed_canonical) {
-            return Ok(check_path);
+        let allowed_normalized = normalize_path(&allowed_canonical);
+
+        if !normalized.starts_with(&allowed_normalized) {
+            continue;
         }
+
+        // Second pass: if the path (or its parent) exists on disk, verify with
+        // canonicalize to resolve any symlinks.
+        if normalized.exists() {
+            let canonical = normalized.canonicalize()?;
+            if canonical.starts_with(&allowed_canonical) {
+                return Ok(canonical);
+            }
+            bail!(
+                "Path '{}' resolves via symlink to outside allowed directories",
+                path
+            );
+        }
+
+        // Path does not exist yet (write case) — canonicalize the longest
+        // existing ancestor and re-check.
+        let mut ancestor = normalized.clone();
+        let mut suffix_parts: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            if ancestor.exists() {
+                let canonical_ancestor = ancestor.canonicalize()?;
+                if canonical_ancestor.starts_with(&allowed_canonical) {
+                    let mut result = canonical_ancestor;
+                    for part in suffix_parts.into_iter().rev() {
+                        result.push(part);
+                    }
+                    return Ok(result);
+                }
+                bail!(
+                    "Path '{}' resolves via symlink to outside allowed directories",
+                    path
+                );
+            }
+            if let Some(name) = ancestor.file_name() {
+                suffix_parts.push(name.to_os_string());
+            }
+            if !ancestor.pop() {
+                break;
+            }
+        }
+
+        // No ancestor exists (shouldn't happen for absolute paths on a real FS,
+        // but handle gracefully) — the normalized check already passed.
+        return Ok(normalized);
     }
 
     bail!(
@@ -278,5 +337,77 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "nested");
+    }
+
+    #[test]
+    fn test_validate_path_traversal_nonexistent_parent() {
+        // This is the key bypass case: the intermediate dirs don't exist so
+        // canonicalize can't resolve them, but the `..` components escape the
+        // allowed directory.
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = vec![dir.path().to_path_buf()];
+
+        let sneaky = format!("{}/nonexistent/../../etc/passwd", dir.path().display());
+        let result = validate_path(&sneaky, &allowed);
+        assert!(result.is_err(), "should reject traversal via nonexistent parent");
+        assert!(
+            result.unwrap_err().to_string().contains("outside allowed"),
+            "error message should mention outside allowed directories"
+        );
+    }
+
+    #[test]
+    fn test_validate_path_deep_traversal_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = vec![dir.path().to_path_buf()];
+
+        // Multiple levels of nonexistent dirs with enough `..` to escape
+        let sneaky = format!(
+            "{}/a/b/c/../../../../etc/shadow",
+            dir.path().display()
+        );
+        let result = validate_path(&sneaky, &allowed);
+        assert!(result.is_err(), "should reject deep traversal");
+    }
+
+    #[test]
+    fn test_validate_path_traversal_with_dot_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = vec![dir.path().to_path_buf()];
+
+        // Mix `.` and `..` to try to confuse the normalizer
+        let sneaky = format!("{}/./nonexistent/./../../../etc/passwd", dir.path().display());
+        let result = validate_path(&sneaky, &allowed);
+        assert!(result.is_err(), "should reject traversal with mixed . and ..");
+    }
+
+    #[test]
+    fn test_validate_path_legitimate_dotdot_within_allowed() {
+        // A `..` that stays within the allowed directory should still work
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = vec![dir.path().to_path_buf()];
+
+        // Create a subdir so the path makes sense
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let file = dir.path().join("legit.txt");
+        std::fs::write(&file, "ok").unwrap();
+
+        let path = format!("{}/sub/../legit.txt", dir.path().display());
+        let result = validate_path(&path, &allowed);
+        assert!(result.is_ok(), ".. that stays within allowed dir should be fine");
+    }
+
+    #[test]
+    fn test_normalize_path_basic() {
+        let p = PathBuf::from("/a/b/../c/./d");
+        assert_eq!(normalize_path(&p), PathBuf::from("/a/c/d"));
+    }
+
+    #[test]
+    fn test_normalize_path_at_root() {
+        // `..` at root should stay at root
+        let p = PathBuf::from("/a/../../../b");
+        assert_eq!(normalize_path(&p), PathBuf::from("/b"));
     }
 }

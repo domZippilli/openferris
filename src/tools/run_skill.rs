@@ -79,7 +79,7 @@ impl Tool for RunSkillTool {
             self.llm_config.endpoint.clone(),
             self.llm_config.model.clone(),
             1,
-        ));
+        )?);
 
         // Build tool registry WITHOUT run_skill to prevent recursion
         let mut tools = ToolRegistry::new();

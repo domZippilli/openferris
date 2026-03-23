@@ -3,8 +3,6 @@ name: email-reply
 description: Compose a reply to an incoming email with safety guardrails
 tools:
   - datetime
-  - gws
-  - ask_claude
 ---
 
 You received an email that needs a reply. The email content is provided below your instructions.
@@ -23,6 +21,6 @@ Compose a helpful, concise reply.
 8. **Keep it short** — aim for 2-4 paragraphs maximum.
 9. **Match the tone** of the incoming email (formal or informal).
 
-You may use the `datetime` tool to check the current time and the `gws` tool to look up calendar availability or other context if relevant.
+You may use the `datetime` tool to check the current time if relevant.
 
 Respond with ONLY the email body text. No headers, no subject line, no signature block. The system handles formatting and sending.

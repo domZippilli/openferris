@@ -48,18 +48,18 @@ struct ResponseMessage {
 }
 
 impl LlamaCppBackend {
-    pub fn new(endpoint: String, model: Option<String>, slot: i32) -> Self {
+    pub fn new(endpoint: String, model: Option<String>, slot: i32) -> Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .expect("Failed to build HTTP client");
+            .context("Failed to build HTTP client")?;
 
-        Self {
+        Ok(Self {
             client,
             endpoint,
             model,
             slot,
-        }
+        })
     }
 }
 

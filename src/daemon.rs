@@ -123,7 +123,13 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
 
     // Accept connections
     loop {
-        let (stream, addr) = listener.accept().await?;
+        let (stream, addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::error!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
         tracing::info!("Client connected: {}", addr);
         let tx = tx.clone();
 

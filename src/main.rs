@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let soul = config::load_soul()?;
 
-            let llm_backend = create_llm_backend(&config, 0);
+            let llm_backend = create_llm_backend(&config, 0)?;
 
             let db_path = config::data_dir().join("openferris.db");
 
@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
             let soul = config::load_soul()?;
             let identity = config::load_identity();
             let user_profile = config::load_user();
-            let llm_backend = create_llm_backend(&config, 0);
+            let llm_backend = create_llm_backend(&config, 0)?;
 
             let db_path = config::data_dir().join("openferris.db");
 
@@ -329,20 +329,20 @@ fn schedule_command(cmd: ScheduleCommand) -> Result<()> {
     Ok(())
 }
 
-fn create_llm_backend(config: &config::AppConfig, slot: i32) -> Box<dyn llm::LlmBackend> {
+fn create_llm_backend(config: &config::AppConfig, slot: i32) -> anyhow::Result<Box<dyn llm::LlmBackend>> {
     match config.llm.backend.as_str() {
-        "llamacpp" => Box::new(llm::llamacpp::LlamaCppBackend::new(
+        "llamacpp" => Ok(Box::new(llm::llamacpp::LlamaCppBackend::new(
             config.llm.endpoint.clone(),
             config.llm.model.clone(),
             slot,
-        )),
+        )?)),
         other => {
             tracing::warn!("Unknown LLM backend '{}', defaulting to llamacpp", other);
-            Box::new(llm::llamacpp::LlamaCppBackend::new(
+            Ok(Box::new(llm::llamacpp::LlamaCppBackend::new(
                 config.llm.endpoint.clone(),
                 config.llm.model.clone(),
                 slot,
-            ))
+            )?))
         }
     }
 }

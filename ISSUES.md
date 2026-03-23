@@ -1,54 +1,97 @@
 # Issues
 
-## Subagent tool for skill delegation
+## P1 — Security: Merge Blockers
 
-The agent currently can't properly delegate to other skills. When asked to "run the headline scrape," it reads the SKILL.md and tries to follow it inline, which pollutes its context, burns its iteration budget, and often goes wrong (e.g. trying `gws run headline-scrape`).
+From full codebase review (2026-03-23). These form a compound attack chain:
+crafted email → prompt injection → LLM writes malicious SKILL.md → cron persistence → autonomous execution.
 
-### Proposal: `run_skill` tool
+### P1-A: Unauthenticated TCP daemon
+- **File:** `daemon.rs:126`
+- **Risk:** Any local process can issue commands to the daemon
+- **Fix:** Switch to Unix domain socket with `chmod 600`, or add shared-secret handshake
 
-A tool that spawns a subagent with its own skill, system prompt, tool registry (with the skill's sieve applied), and llama.cpp slot. Returns the subagent's final response as a string.
+### P1-B: Cron injection via unsanitized inputs
+- **File:** `schedule.rs:60-68`
+- **Risk:** `skill_name`/`cron_expr` written to crontab unsanitized → arbitrary code execution
+- **Fix:** Strict regex validation — alphanumeric + hyphens for skill_name, validated fields for cron_expr
 
-**Parameters:** `{"skill_name": "<name>", "context": "<optional extra context>"}`
+### P1-C: Prompt injection in email-reply [HIGHEST PRIORITY — externally exploitable]
+- **File:** `gmail.rs:296`, `email-reply/SKILL.md`
+- **Risk:** Raw email body reaches LLM with `gws`/`ask_claude` tools available → data exfiltration
+- **Fix:** Remove `gws`/`ask_claude` from email-reply tool allowlist; add `[UNTRUSTED CONTENT BELOW]` delimiter
 
-**Architecture:**
-- The `run_skill` tool needs access to: skill loader, LLM backend, tool registry factory, soul/identity/user_profile
-- Each subagent gets its own llama.cpp slot (`id_slot: 1`, `2`, etc.) so KV caches don't collide. The parent agent uses slot 0.
-- llama.cpp must be configured with multiple slots (`-np 4` or similar). Currently may be running with 1 slot — needs config change.
-- Subagent gets its own iteration budget (same MAX_ITERATIONS as parent)
-- Depth limit: subagents cannot themselves spawn subagents (depth=1 max)
-- The subagent's tool registry is built fresh with the skill's tool sieve applied
-- Subagent does NOT get session history — it's a one-shot execution
+### P1-D: Workspace skill self-escalation
+- **File:** `skills.rs:71-98`
+- **Risk:** Agent can write_file a SKILL.md with any tool list, then schedule it
+- **Fix:** Enforce maximum tool allowlist for workspace-created skills, or validate tool lists on load
 
-**Open questions:**
-- Should the `run_skill` tool be in the default skill's tool list only, or available to all skills?
-- Should the parent see subagent tool calls in the trace (for debugging), or just the final result?
-- Memory: if the subagent extracts `<memory>` tags, should those propagate to the parent?
-- Concurrency: should the parent be able to launch multiple subagents in parallel? (Probably not in v1)
-- What llama.cpp slot count to configure? 4 seems safe for 1 parent + a few subagents.
+### P1-E: Path traversal bypass
+- **File:** `tools/files.rs:29-38`
+- **Risk:** Non-existent parent causes canonicalize to fail, `starts_with` check is bypassed
+- **Fix:** Manual `..` component normalization before `starts_with` check
 
-**llama.cpp slot configuration:**
-- Start the server with `-np 4` (or `--parallel 4`) to enable 4 slots
-- The `id_slot` field in the chat completion request pins to a specific slot
-- Add `parallel_slots` to `LlmConfig` in config.toml (default 1 for backward compat):
-  ```toml
-  [llm]
-  endpoint = "http://localhost:8080"
-  parallel_slots = 4
-  ```
-- `LlamaCppBackend` takes a slot parameter; parent agent uses slot 0, subagents use 1..N
-- `create_llm_backend()` in main.rs passes the slot; `run_skill` tool creates backends with different slots
+### P1-F: Daemon crash on accept error
+- **File:** `daemon.rs:126`
+- **Risk:** `EMFILE`/`ECONNABORTED` propagates to main → daemon exits
+- **Fix:** Catch accept errors, log, `continue`
+
+### P1-G: `unwrap()` on crontab stdin
+- **File:** `schedule.rs:29-31`
+- **Risk:** Panic if pipe creation fails → daemon worker crash
+- **Fix:** Replace with `Result` propagation
+
+### P1-H: `expect()` in LlamaCppBackend::new
+- **File:** `llm/llamacpp.rs:54`
+- **Risk:** Panic on TLS init failure → daemon worker crash via subagent
+- **Fix:** Return `Result` from constructor
 
 ---
 
-## Agent context management for longer sessions
+## P2 — Reliability: Fix Before Enabling Integrations
+
+### P2-A: Unbounded worker channel
+- `daemon.rs:36` — no backpressure on slow LLM → memory exhaustion
+
+### P2-B: Dual SQLite writers without WAL mode
+- `gmail.rs:81`, `storage.rs` — `SQLITE_BUSY`, lost contact records
+
+### P2-C: RunSkillTool hardcodes LlamaCppBackend
+- `run_skill.rs:78` — backend abstraction broken
+
+### P2-D: SSRF bypass via DNS rebinding and redirect chains
+- `tools/web.rs:69-95` — internal network access
+
+### P2-E: JSON construction via `format!` in Gmail poller
+- `gmail.rs:222,149` — JSON injection, malformed API calls
+
+### P2-F: No timeout on subprocess calls (gws, claude, crontab)
+- Multiple files — daemon worker blocks indefinitely
+
+### P2-G: Security controls untested
+- SSRF protection, email authorization — implemented but unverified
+
+---
+
+## P3 — Hardening (Next Development Cycle)
+
+- P3-A: Email header injection (CRLF in subject/to)
+- P3-B: Empty `allowed_senders` disables all outbound authorization
+- P3-C: Email address parsing susceptible to crafted display names
+- P3-D: Unknown LLM backend silently falls back to llamacpp
+- P3-E: Session history cloned without bound
+- P3-F: `reqwest::Client` recreated per tool invocation
+- P3-G: `memories.rs` not in library crate
+- P3-H: `validate_path` recanonicalized on every operation
+- P3-I: Blocking I/O in async contexts
+- P3-J: `parse_tool_calls` edge cases untested
+
+---
+
+## Older Issues
+
+### Agent context management for longer sessions
 
 The agent loop appends every LLM response and tool result to the message list with no size management. For longer sessions this will overflow the LLM context window.
 
-Two things to address:
-
-1. **Raise iteration limit** — current cap of 20 is too low for multi-step tasks. Bump to ~50 or make configurable.
-
-2. **Context compaction** — when the message list approaches the context limit:
-   - Track token budget per message (estimate from char count or tokenizer).
-   - When nearing the limit, ask the LLM to summarize the conversation so far into a single message, then continue with that summary.
-   - Consider also capping individual tool results at a reasonable length (e.g. 8K chars) as a cheap first line of defense.
+1. **Context compaction** — when nearing the limit, summarize conversation so far
+2. **Tool result capping** — limit individual tool results to ~8K chars
