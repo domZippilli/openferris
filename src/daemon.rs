@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
+use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 
 use openferris::agent::{Agent, AgentResult};
@@ -30,8 +30,18 @@ struct LogData {
 
 pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Memories) -> Result<()> {
     let agent = Arc::new(agent);
-    let listener = TcpListener::bind(&config.daemon.listen).await?;
-    tracing::info!("OpenFerris daemon listening on {}", config.daemon.listen);
+    let socket_path = &config.daemon.socket;
+    // Remove stale socket file from a previous run
+    if std::path::Path::new(socket_path).exists() {
+        std::fs::remove_file(socket_path)?;
+    }
+    let listener = UnixListener::bind(socket_path)?;
+    // Restrict socket to owner only
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    tracing::info!("OpenFerris daemon listening on {}", socket_path);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<QueuedRequest>();
 
@@ -123,14 +133,14 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
 
     // Accept connections
     loop {
-        let (stream, addr) = match listener.accept().await {
+        let (stream, _addr) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 tracing::error!("Failed to accept connection: {}", e);
                 continue;
             }
         };
-        tracing::info!("Client connected: {}", addr);
+        tracing::info!("Client connected");
         let tx = tx.clone();
 
         tokio::spawn(async move {
@@ -143,7 +153,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                 line.clear();
                 match reader.read_line(&mut line).await {
                     Ok(0) => {
-                        tracing::info!("Client disconnected: {}", addr);
+                        tracing::info!("Client disconnected");
                         break;
                     }
                     Ok(_) => {
@@ -166,7 +176,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                             }
                         };
 
-                        tracing::debug!("Daemon request from {}: {:?}", addr, request.kind);
+                        tracing::debug!("Daemon request: {:?}", request.kind);
 
                         let is_freeform =
                             matches!(request.kind, RequestKind::FreeformMessage { .. });
@@ -217,7 +227,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Read error from {}: {}", addr, e);
+                        tracing::error!("Client read error: {}", e);
                         break;
                     }
                 }
@@ -227,7 +237,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
 }
 
 async fn write_response(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
     response: &DaemonResponse,
 ) -> Result<()> {
     let mut data = serde_json::to_string(response)?;

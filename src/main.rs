@@ -135,14 +135,14 @@ async fn main() -> Result<()> {
             daemon::run(config, agent, storage, mems).await?;
         }
         Commands::Tui => {
-            tui::run(&config.daemon.listen).await?;
+            tui::run(&config.daemon.socket).await?;
         }
         Commands::Telegram => {
             let tg_config = config
                 .telegram
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("No [telegram] section in config.toml. Add bot_token to enable."))?;
-            telegram::run(config.daemon.listen.clone(), tg_config).await?;
+            telegram::run(config.daemon.socket.clone(), tg_config).await?;
         }
         Commands::Gmail => {
             let gmail_config = config
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
                         "No [gmail] section in config.toml. Add allowed_senders to enable."
                     )
                 })?;
-            gmail::run(config.daemon.listen.clone(), gmail_config).await?;
+            gmail::run(config.daemon.socket.clone(), gmail_config).await?;
         }
         Commands::TestAgent { prompt, skill } => {
             let soul = config::load_soul()?;
@@ -198,7 +198,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Run { skill_name } => {
-            let result = client::send_skill(&config.daemon.listen, &skill_name).await?;
+            let result = client::send_skill(&config.daemon.socket, &skill_name).await?;
             println!("{}", result);
         }
         Commands::Schedule(cmd) => {

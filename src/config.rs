@@ -47,14 +47,15 @@ fn default_parallel_slots() -> u32 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonConfig {
-    #[serde(default = "default_listen")]
-    pub listen: String,
+    /// Path to the Unix domain socket.
+    #[serde(default = "default_socket")]
+    pub socket: String,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            listen: default_listen(),
+            socket: default_socket(),
         }
     }
 }
@@ -118,8 +119,13 @@ pub fn allowed_directories(config: &FilesConfig) -> Vec<PathBuf> {
     dirs
 }
 
-fn default_listen() -> String {
-    "127.0.0.1:7700".to_string()
+fn default_socket() -> String {
+    // Prefer XDG_RUNTIME_DIR (per-user, tmpfs, correct permissions)
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        format!("{}/openferris.sock", runtime_dir)
+    } else {
+        format!("{}/openferris.sock", data_dir().display())
+    }
 }
 
 pub fn config_dir() -> PathBuf {

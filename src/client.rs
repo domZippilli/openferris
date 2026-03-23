@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::net::UnixStream;
 
 use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
 
-pub async fn send_skill(address: &str, skill_name: &str) -> Result<String> {
+pub async fn send_skill(socket_path: &str, skill_name: &str) -> Result<String> {
     let request = DaemonRequest {
         id: uuid::Uuid::new_v4().to_string(),
         kind: RequestKind::RunSkill {
@@ -13,11 +13,11 @@ pub async fn send_skill(address: &str, skill_name: &str) -> Result<String> {
         },
         source: Some("cli".to_string()),
     };
-    send_request(address, &request).await
+    send_request(socket_path, &request).await
 }
 
-pub async fn send_request(address: &str, request: &DaemonRequest) -> Result<String> {
-    let stream = TcpStream::connect(address)
+pub async fn send_request(socket_path: &str, request: &DaemonRequest) -> Result<String> {
+    let stream = UnixStream::connect(socket_path)
         .await
         .context("Failed to connect to daemon. Is it running? Start with: openferris daemon")?;
 

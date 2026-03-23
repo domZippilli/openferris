@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::TcpStream;
+use tokio::net::UnixStream;
 
 use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
 
-pub async fn run(address: &str) -> Result<()> {
-    let stream = TcpStream::connect(address)
+pub async fn run(socket_path: &str) -> Result<()> {
+    let stream = UnixStream::connect(socket_path)
         .await
         .context("Failed to connect to daemon. Is it running? Start with: openferris daemon")?;
 
@@ -16,7 +16,7 @@ pub async fn run(address: &str) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut stdin_reader = BufReader::new(stdin);
 
-    println!("OpenFerris TUI — connected to daemon at {}", address);
+    println!("OpenFerris TUI — connected to daemon at {}", socket_path);
     println!("Type your message and press Enter. Ctrl+C to quit.");
     println!("  /remember <fact> — save a memory directly\n");
 
