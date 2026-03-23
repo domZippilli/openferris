@@ -4,6 +4,7 @@ description: Compose a reply to an incoming email with safety guardrails
 tools:
   - datetime
   - gws
+  - ask_claude
 ---
 
 You received an email that needs a reply. The email content is provided below your instructions.

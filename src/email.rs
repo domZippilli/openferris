@@ -19,6 +19,7 @@ pub async fn send_email(
     in_reply_to: Option<&str>,
     references: Option<&str>,
     thread_id: Option<&str>,
+    content_type: Option<&str>,
 ) -> Result<()> {
     let recipient = parse_email_address(to);
 
@@ -38,7 +39,7 @@ pub async fn send_email(
     }
 
     // Compose RFC 2822
-    let raw = compose_raw(from, to, None, subject, body, in_reply_to, references);
+    let raw = compose_raw(from, to, None, subject, body, in_reply_to, references, content_type);
     let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
 
     let mut send_body = serde_json::json!({ "raw": encoded });
@@ -67,6 +68,7 @@ pub async fn send_email_with_db(
     cc: Option<&str>,
     subject: &str,
     body: &str,
+    content_type: Option<&str>,
 ) -> Result<()> {
     let recipient = parse_email_address(to);
 
@@ -86,7 +88,7 @@ pub async fn send_email_with_db(
         }
     }
 
-    let raw = compose_raw(None, to, cc, subject, body, None, None);
+    let raw = compose_raw(None, to, cc, subject, body, None, None, content_type);
     let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
     let send_body = serde_json::json!({ "raw": encoded });
 
@@ -109,6 +111,7 @@ fn compose_raw(
     body: &str,
     in_reply_to: Option<&str>,
     references: Option<&str>,
+    content_type: Option<&str>,
 ) -> String {
     let mut msg = String::new();
     if let Some(from) = from {
@@ -134,7 +137,8 @@ fn compose_raw(
         }
     }
 
-    msg.push_str("Content-Type: text/plain; charset=\"utf-8\"\r\n");
+    let ct = content_type.unwrap_or("text/plain");
+    msg.push_str(&format!("Content-Type: {}; charset=\"utf-8\"\r\n", ct));
     msg.push_str("MIME-Version: 1.0\r\n");
     msg.push_str("\r\n");
     msg.push_str(body);
@@ -190,6 +194,7 @@ mod tests {
             "Hi there!",
             None,
             None,
+            None,
         );
 
         assert!(!raw.contains("From:"));
@@ -197,6 +202,7 @@ mod tests {
         assert!(!raw.contains("Cc:"));
         assert!(raw.contains("Subject: Hello\r\n"));
         assert!(!raw.contains("In-Reply-To"));
+        assert!(raw.contains("Content-Type: text/plain"));
         assert!(raw.contains("Hi there!"));
     }
 
@@ -208,6 +214,7 @@ mod tests {
             None,
             "Hello",
             "Hi!",
+            None,
             None,
             None,
         );
@@ -223,6 +230,7 @@ mod tests {
             Some("boss@example.com"),
             "Hello",
             "Hi!",
+            None,
             None,
             None,
         );
@@ -242,10 +250,28 @@ mod tests {
             "Thanks!",
             Some("<abc@mail>"),
             Some("<prev@mail>"),
+            None,
         );
 
         assert!(raw.contains("In-Reply-To: <abc@mail>\r\n"));
         assert!(raw.contains("References: <prev@mail> <abc@mail>\r\n"));
+    }
+
+    #[test]
+    fn test_compose_raw_html() {
+        let raw = compose_raw(
+            None,
+            "them@example.com",
+            None,
+            "Briefing",
+            "<h2>Hello</h2><p>World</p>",
+            None,
+            None,
+            Some("text/html"),
+        );
+
+        assert!(raw.contains("Content-Type: text/html; charset=\"utf-8\""));
+        assert!(raw.contains("<h2>Hello</h2><p>World</p>"));
     }
 
     #[test]

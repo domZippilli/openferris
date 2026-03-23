@@ -28,9 +28,10 @@ impl Tool for SendEmailTool {
 
     fn description_for_llm(&self) -> &str {
         "Send an email via Gmail. \
-         Parameters: {\"to\": \"<email address>\", \"subject\": \"<subject line>\", \"body\": \"<email body text>\", \"cc\": \"<optional cc address>\"}. \
+         Parameters: {\"to\": \"<email address>\", \"subject\": \"<subject line>\", \"body\": \"<email body text>\", \"cc\": \"<optional cc address>\", \"content_type\": \"<optional: text/plain or text/html>\"}. \
          The recipient must be in the allowed contacts list or someone you have previously emailed. \
-         Use this for sending notifications, briefings, or replies to known contacts."
+         Use this for sending notifications, briefings, or replies to known contacts. \
+         Set content_type to text/html when sending HTML-formatted emails."
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
@@ -50,6 +51,7 @@ impl Tool for SendEmailTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: body"))?;
 
         let param_cc = params.get("cc").and_then(|v| v.as_str());
+        let content_type = params.get("content_type").and_then(|v| v.as_str());
 
         // Merge param cc with always_cc config
         let cc = match (param_cc, &self.always_cc) {
@@ -66,6 +68,7 @@ impl Tool for SendEmailTool {
             cc.as_deref(),
             subject,
             body,
+            content_type,
         )
         .await?;
 

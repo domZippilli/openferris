@@ -336,6 +336,7 @@ async fn process_message(
         Some(&message_id_header),
         Some(&references),
         Some(&thread_id),
+        None,
     )
     .await?;
 
