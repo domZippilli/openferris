@@ -52,8 +52,12 @@ crafted email → prompt injection → LLM writes malicious SKILL.md → cron pe
 ### P2-A: Unbounded worker channel
 - `daemon.rs:36` — no backpressure on slow LLM → memory exhaustion
 
-### P2-B: Dual SQLite writers without WAL mode
-- `gmail.rs:81`, `storage.rs` — `SQLITE_BUSY`, lost contact records
+### P2-B: Dual SQLite writers without WAL mode — **RESOLVED 2026-04-11**
+- **Was:** Gmail listener (separate process) and daemon worker (another process) both opened writer connections to `openferris.db` without WAL, causing `SQLITE_BUSY` errors that silently dropped `known_contacts` inserts during concurrent writes.
+- **Resolution:**
+  - `Storage::open` now enables `PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=5000` for every writer.
+  - Audit confirmed every writer in the codebase (`main.rs` daemon startup, `main.rs` CLI forget/error-log, `gmail.rs:81` listener, `email.rs:77/98` send-email tool paths) goes through `Storage::open`; no raw `Connection::open` exists outside `storage.rs`.
+  - Regression test `storage::tests::test_concurrent_writers_do_not_busy_out` races 4 threads × 50 writes across 4 independent `Storage` handles on the same file and asserts no writes are lost.
 
 ### P2-C: RunSkillTool hardcodes LlamaCppBackend
 - `run_skill.rs:78` — backend abstraction broken
@@ -69,6 +73,14 @@ crafted email → prompt injection → LLM writes malicious SKILL.md → cron pe
 
 ### P2-G: Security controls untested
 - SSRF protection, email authorization — implemented but unverified
+
+### P2-H: CLI client silently exits on daemon-connect failure — **RESOLVED 2026-04-11**
+- **Was:** `openferris run <skill>` failed silently under cron (which discards stderr) when the client's env-derived socket path didn't match the daemon's. Specifically: after commit `debe47b` the socket path came from `$XDG_RUNTIME_DIR`, which cron doesn't set, so every cron-fired CLI run failed invisibly from 2026-04-05 through 2026-04-11.
+- **Resolution:**
+  - `daemon.rs` now publishes its bound socket path to `~/.local/share/openferris/daemon.socket.path` on startup (`config::socket_pointer_path()`).
+  - `client::read_socket_pointer()` reads that file; `main.rs` Commands::Run tries the configured/env-derived path first, then falls back to the published path if the primary connect fails. This removes the env-divergence failure mode entirely.
+  - On terminal failure (both paths unreachable), the CLI now opens the storage DB directly and writes a row to `interactions` with `source='cli'`, `skill=<requested>`, `agent_response=<error incl. both paths>`, then exits 1. Cron monitoring can query `WHERE source='cli' AND agent_response LIKE 'daemon unreachable%'`.
+  - `Storage::open` now enables WAL + `busy_timeout=5000` so the CLI can write to the same DB as the daemon without `SQLITE_BUSY` (also closes P2-B).
 
 ---
 

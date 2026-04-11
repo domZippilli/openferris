@@ -198,8 +198,53 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Run { skill_name } => {
-            let result = client::send_skill(&config.daemon.socket, &skill_name).await?;
-            println!("{}", result);
+            let primary = config.daemon.socket.clone();
+            let outcome = match client::send_skill(&primary, &skill_name).await {
+                Ok(r) => Ok(r),
+                Err(primary_err) => match client::read_socket_pointer() {
+                    Some(fallback) if fallback != primary => {
+                        match client::send_skill(&fallback, &skill_name).await {
+                            Ok(r) => {
+                                tracing::warn!(
+                                    "Connected via daemon-published socket {} (primary {} unreachable)",
+                                    fallback,
+                                    primary
+                                );
+                                Ok(r)
+                            }
+                            Err(fallback_err) => Err(anyhow::anyhow!(
+                                "daemon unreachable:\n  primary {}: {:#}\n  fallback {}: {:#}",
+                                primary,
+                                primary_err,
+                                fallback,
+                                fallback_err
+                            )),
+                        }
+                    }
+                    _ => Err(primary_err
+                        .context(format!("daemon unreachable at socket {}", primary))),
+                },
+            };
+
+            match outcome {
+                Ok(response) => println!("{}", response),
+                Err(e) => {
+                    let msg = format!("{:#}", e);
+                    eprintln!("openferris run {}: {}", skill_name, msg);
+                    if let Ok(store) =
+                        storage::Storage::open(&config::data_dir().join("openferris.db"))
+                        && let Err(log_err) = store.log_interaction(
+                            "cli",
+                            Some(&skill_name),
+                            &format!("run {}", skill_name),
+                            &msg,
+                        )
+                    {
+                        eprintln!("also failed to log interaction: {}", log_err);
+                    }
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Schedule(cmd) => {
             schedule_command(cmd)?;

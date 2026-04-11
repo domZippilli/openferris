@@ -41,6 +41,19 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
     }
+    // Publish the resolved socket path so CLI clients that compute a different
+    // default (e.g. cron without $XDG_RUNTIME_DIR) can fall back to the real one.
+    let pointer = config::socket_pointer_path();
+    if let Some(parent) = pointer.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&pointer, socket_path) {
+        tracing::warn!(
+            "Failed to write socket pointer file {}: {}",
+            pointer.display(),
+            e
+        );
+    }
     tracing::info!("OpenFerris daemon listening on {}", socket_path);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<QueuedRequest>();

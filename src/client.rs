@@ -2,7 +2,22 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+use openferris::config;
 use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
+
+/// Read the daemon-published socket pointer file, if it exists and is non-empty.
+/// The daemon writes this on startup so clients with a different env-derived
+/// default path (notably cron without `$XDG_RUNTIME_DIR`) can still find it.
+pub fn read_socket_pointer() -> Option<String> {
+    let path = config::socket_pointer_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
 
 pub async fn send_skill(socket_path: &str, skill_name: &str) -> Result<String> {
     let request = DaemonRequest {

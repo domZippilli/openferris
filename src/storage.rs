@@ -23,6 +23,10 @@ impl Storage {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
+        // WAL + busy_timeout so the daemon worker and CLI fallback path can
+        // write concurrently without SQLITE_BUSY.
+        conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS interactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,5 +182,57 @@ mod tests {
         let s = temp_storage();
         let ctx = s.build_context().unwrap();
         assert!(ctx.is_empty());
+    }
+
+    // Regression for P2-B: two Storage handles on the same file (simulating
+    // daemon + gmail-listener processes) must be able to write concurrently
+    // without SQLITE_BUSY. Requires WAL + busy_timeout in Storage::open.
+    #[test]
+    fn test_concurrent_writers_do_not_busy_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("concurrent.db");
+
+        // Initial open creates the schema and enables WAL on the file.
+        let _seed = Storage::open(&db_path).unwrap();
+
+        const THREADS: usize = 4;
+        const WRITES_PER_THREAD: usize = 50;
+
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let path = db_path.clone();
+            handles.push(std::thread::spawn(move || {
+                let store = Storage::open(&path).unwrap();
+                for i in 0..WRITES_PER_THREAD {
+                    store
+                        .log_interaction(
+                            "test",
+                            Some("concurrent"),
+                            &format!("thread {} msg {}", t, i),
+                            "ok",
+                        )
+                        .expect("write should not SQLITE_BUSY under WAL");
+                    store
+                        .add_contact(&format!("t{}_{}@example.com", t, i))
+                        .expect("add_contact should not SQLITE_BUSY");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let reader = Storage::open(&db_path).unwrap();
+        let total: usize = reader
+            .conn
+            .query_row("SELECT COUNT(*) FROM interactions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, THREADS * WRITES_PER_THREAD);
+
+        let contacts: usize = reader
+            .conn
+            .query_row("SELECT COUNT(*) FROM known_contacts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(contacts, THREADS * WRITES_PER_THREAD);
     }
 }

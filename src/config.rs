@@ -140,6 +140,13 @@ pub fn data_dir() -> PathBuf {
         .join("openferris")
 }
 
+/// Path to the file the daemon writes on startup with its actual bound socket
+/// path. Clients (esp. cron, which lacks `$XDG_RUNTIME_DIR`) can fall back to
+/// this when the env-derived `default_socket()` path doesn't match the daemon.
+pub fn socket_pointer_path() -> PathBuf {
+    data_dir().join("daemon.socket.path")
+}
+
 pub fn load_config() -> Result<AppConfig> {
     let path = config_dir().join("config.toml");
     let content = std::fs::read_to_string(&path).with_context(|| {
