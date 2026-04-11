@@ -11,6 +11,7 @@ tools:
   - send_telegram
   - send_email
   - gws
+  - journal_logs
   - run_skill
   - ask_claude
 ---

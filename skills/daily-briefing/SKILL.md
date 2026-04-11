@@ -5,6 +5,7 @@ tools:
   - datetime
   - send_telegram
   - send_email
+  - headline-scrape
 ---
 
 Prepare a morning briefing for your human.

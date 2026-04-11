@@ -2,6 +2,7 @@ pub mod ask_claude;
 pub mod datetime;
 pub mod files;
 pub mod gws;
+pub mod logs;
 pub mod run_skill;
 pub mod schedule;
 pub mod send_email;
@@ -77,6 +78,7 @@ impl ToolRegistry {
         self.register(Box::new(web::FetchUrlTool));
         self.register(Box::new(schedule::ScheduleTool));
         self.register(Box::new(gws::GwsTool));
+        self.register(Box::new(logs::JournalLogsTool));
         self.register(Box::new(ask_claude::AskClaudeTool));
 
         if let Some(ref tg) = config.telegram {
