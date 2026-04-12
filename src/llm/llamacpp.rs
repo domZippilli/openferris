@@ -45,6 +45,12 @@ struct Choice {
 #[derive(Deserialize)]
 struct ResponseMessage {
     content: String,
+    /// Gemma 4 (and other reasoning models) emit chain-of-thought tokens into
+    /// this separate field when llama.cpp's chat-template parser is splitting
+    /// them off `content`. Captured for observability only — not fed back into
+    /// the agent loop.
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 impl LlamaCppBackend {
@@ -115,6 +121,16 @@ impl LlmBackend for LlamaCppBackend {
             if reason == "length" {
                 tracing::warn!("LLM output truncated (finish_reason=length) — response may be incomplete");
             }
+        }
+
+        if let Some(reasoning) = &choice.message.reasoning_content
+            && !reasoning.is_empty()
+        {
+            tracing::debug!(
+                "LLM reasoning ({} chars): {}",
+                reasoning.len(),
+                reasoning
+            );
         }
 
         Ok(choice.message.content)
