@@ -107,6 +107,7 @@ impl Tool for RunSkillTool {
                 &self.identity,
                 &self.user_profile,
                 "",
+                None,
             )
             .await?;
 

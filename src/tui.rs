@@ -66,23 +66,32 @@ pub async fn run(socket_path: &str) -> Result<()> {
         tcp_writer.write_all(data.as_bytes()).await?;
         tcp_writer.flush().await?;
 
-        let mut response_line = String::new();
-        tcp_reader.read_line(&mut response_line).await?;
+        loop {
+            let mut response_line = String::new();
+            tcp_reader.read_line(&mut response_line).await?;
 
-        if response_line.is_empty() {
-            eprintln!("Daemon disconnected.");
-            break;
-        }
-
-        let response: DaemonResponse = serde_json::from_str(response_line.trim())
-            .context("Failed to parse daemon response")?;
-
-        match response.kind {
-            ResponseKind::Done { text } => {
-                println!("\n{}\n", text);
+            if response_line.is_empty() {
+                eprintln!("Daemon disconnected.");
+                return Ok(());
             }
-            ResponseKind::Error { message } => {
-                eprintln!("\nError: {}\n", message);
+
+            let response: DaemonResponse = serde_json::from_str(response_line.trim())
+                .context("Failed to parse daemon response")?;
+
+            match response.kind {
+                ResponseKind::Done { text } => {
+                    eprint!("\r\x1b[K");
+                    println!("\n{}\n", text);
+                    break;
+                }
+                ResponseKind::Error { message } => {
+                    eprint!("\r\x1b[K");
+                    eprintln!("\nError: {}\n", message);
+                    break;
+                }
+                ResponseKind::Progress { text } => {
+                    eprint!("\r\x1b[K{}", text);
+                }
             }
         }
     }

@@ -1,6 +1,8 @@
 use anyhow::Result;
+use tokio::sync::mpsc;
 
 use crate::llm::{ChatMessage, LlmBackend, Role};
+use crate::protocol::tool_progress_label;
 use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 
@@ -36,6 +38,7 @@ impl Agent {
         identity: &str,
         user_profile: &str,
         persistent_context: &str,
+        progress_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> Result<AgentResult> {
         let system_prompt = self.build_system_prompt(skill, identity, user_profile, persistent_context);
 
@@ -80,6 +83,9 @@ impl Agent {
             for call in &tool_calls {
                 tracing::info!("Tool call: {}", call.name);
                 tracing::debug!("Tool params: {} {}", call.name, call.params);
+                if let Some(ref tx) = progress_tx {
+                    let _ = tx.send(tool_progress_label(&call.name).to_string());
+                }
                 let result = match self
                     .tools
                     .execute(&call.name, call.params.clone(), &skill.tools)

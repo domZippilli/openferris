@@ -43,14 +43,20 @@ pub async fn send_request(socket_path: &str, request: &DaemonRequest) -> Result<
     data.push('\n');
     writer.write_all(data.as_bytes()).await?;
 
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        if line.is_empty() {
+            anyhow::bail!("Daemon disconnected");
+        }
 
-    let response: DaemonResponse =
-        serde_json::from_str(line.trim()).context("Failed to parse daemon response")?;
+        let response: DaemonResponse =
+            serde_json::from_str(line.trim()).context("Failed to parse daemon response")?;
 
-    match response.kind {
-        ResponseKind::Done { text } => Ok(text),
-        ResponseKind::Error { message } => anyhow::bail!("{}", message),
+        match response.kind {
+            ResponseKind::Done { text } => return Ok(text),
+            ResponseKind::Error { message } => anyhow::bail!("{}", message),
+            ResponseKind::Progress { .. } => continue,
+        }
     }
 }

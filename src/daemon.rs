@@ -18,6 +18,7 @@ struct QueuedRequest {
     request: DaemonRequest,
     session_history: Vec<ChatMessage>,
     response_tx: oneshot::Sender<DaemonResponse>,
+    progress_tx: mpsc::UnboundedSender<String>,
 }
 
 /// Data needed to log an interaction after the agent finishes.
@@ -112,6 +113,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
             let user_profile = config::load_user();
 
             // Async: run agent
+            let progress_tx = queued.progress_tx.clone();
             let (response, log_data) = process_request(
                 &worker_agent,
                 &queued,
@@ -119,6 +121,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                 &identity,
                 &user_profile,
                 &persistent_context,
+                progress_tx,
             )
             .await;
 
@@ -198,7 +201,9 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                             _ => None,
                         };
 
+                        let request_id = request.id.clone();
                         let (resp_tx, resp_rx) = oneshot::channel();
+                        let (prog_tx, mut prog_rx) = mpsc::unbounded_channel::<String>();
                         let queued = QueuedRequest {
                             request,
                             session_history: if is_freeform {
@@ -207,6 +212,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                                 vec![]
                             },
                             response_tx: resp_tx,
+                            progress_tx: prog_tx,
                         };
 
                         if tx.send(queued).is_err() {
@@ -214,28 +220,53 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                             break;
                         }
 
-                        match resp_rx.await {
-                            Ok(response) => {
-                                // Update session history for freeform conversations
-                                if is_freeform {
-                                    if let Some(text) = user_text {
-                                        session_history.push(ChatMessage {
-                                            role: Role::User,
-                                            content: text,
-                                        });
-                                    }
-                                    if let ResponseKind::Done { ref text } = response.kind {
-                                        session_history.push(ChatMessage {
-                                            role: Role::Assistant,
-                                            content: text.clone(),
-                                        });
-                                    }
+                        // Read progress updates and the final response concurrently.
+                        // The agent fires progress via prog_tx (non-blocking) while
+                        // the worker sends the final response via resp_tx (oneshot).
+                        let mut resp_rx = resp_rx;
+                        let mut finished = false;
+                        while !finished {
+                            tokio::select! {
+                                Some(label) = prog_rx.recv() => {
+                                    let progress = DaemonResponse {
+                                        request_id: request_id.clone(),
+                                        kind: ResponseKind::Progress { text: label },
+                                    };
+                                    let _ = write_response(&mut writer, &progress).await;
                                 }
-                                let _ = write_response(&mut writer, &response).await;
-                            }
-                            Err(_) => {
-                                tracing::error!("Worker dropped response channel");
-                                break;
+                                result = &mut resp_rx => {
+                                    // Drain any remaining progress messages
+                                    while let Ok(label) = prog_rx.try_recv() {
+                                        let progress = DaemonResponse {
+                                            request_id: request_id.clone(),
+                                            kind: ResponseKind::Progress { text: label },
+                                        };
+                                        let _ = write_response(&mut writer, &progress).await;
+                                    }
+                                    match result {
+                                        Ok(response) => {
+                                            if is_freeform {
+                                                if let Some(ref text) = user_text {
+                                                    session_history.push(ChatMessage {
+                                                        role: Role::User,
+                                                        content: text.clone(),
+                                                    });
+                                                }
+                                                if let ResponseKind::Done { ref text } = response.kind {
+                                                    session_history.push(ChatMessage {
+                                                        role: Role::Assistant,
+                                                        content: text.clone(),
+                                                    });
+                                                }
+                                            }
+                                            let _ = write_response(&mut writer, &response).await;
+                                        }
+                                        Err(_) => {
+                                            tracing::error!("Worker dropped response channel");
+                                        }
+                                    }
+                                    finished = true;
+                                }
                             }
                         }
                     }
@@ -268,6 +299,7 @@ async fn process_request(
     identity: &str,
     user_profile: &str,
     persistent_context: &str,
+    progress_tx: mpsc::UnboundedSender<String>,
 ) -> (DaemonResponse, Option<LogData>) {
     let request_id = queued.request.id.clone();
     let source = queued
@@ -284,7 +316,7 @@ async fn process_request(
                         Some(ctx) => format!("Execute the {} skill now.\n\n{}", skill_name, ctx),
                         None => format!("Execute the {} skill now.", skill_name),
                     };
-                    match agent.run(&skill, &msg, &[], identity, user_profile, persistent_context).await {
+                    match agent.run(&skill, &msg, &[], identity, user_profile, persistent_context, Some(progress_tx.clone())).await {
                         Ok(result) => {
                             let log = LogData {
                                 source,
@@ -326,7 +358,7 @@ async fn process_request(
             match skills::load_skill("default", user_skills_dir) {
                 Ok(skill) => {
                     match agent
-                        .run(&skill, text, &queued.session_history, identity, user_profile, persistent_context)
+                        .run(&skill, text, &queued.session_history, identity, user_profile, persistent_context, Some(progress_tx.clone()))
                         .await
                     {
                         Ok(result) => {

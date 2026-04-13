@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 
 use openferris::config::TelegramConfig;
-use openferris::protocol::{DaemonRequest, RequestKind};
-
-use crate::client;
+use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
@@ -62,7 +62,8 @@ pub async fn run(daemon_address: String, tg_config: TelegramConfig) -> Result<()
                 }
             });
 
-            let response = handle_message(&text, &daemon_address).await;
+            let response =
+                handle_message(&text, &daemon_address, &http, &base_url, chat_id).await;
             typing_handle.abort();
 
             // Telegram has a 4096 char message limit
@@ -75,7 +76,13 @@ pub async fn run(daemon_address: String, tg_config: TelegramConfig) -> Result<()
     }
 }
 
-async fn handle_message(text: &str, daemon_address: &str) -> String {
+async fn handle_message(
+    text: &str,
+    daemon_address: &str,
+    http: &reqwest::Client,
+    base_url: &str,
+    chat_id: i64,
+) -> String {
     // Handle /remember command
     let request = if let Some(fact) = text.strip_prefix("/remember ") {
         let fact = fact.trim();
@@ -99,9 +106,73 @@ async fn handle_message(text: &str, daemon_address: &str) -> String {
         }
     };
 
-    match client::send_request(daemon_address, &request).await {
+    match send_request_with_progress(daemon_address, &request, http, base_url, chat_id).await {
         Ok(text) => text,
         Err(e) => format!("Error: {:#}", e),
+    }
+}
+
+/// Send a daemon request and forward progress updates as Telegram status messages.
+/// On first progress: sends a new message and records its ID.
+/// On subsequent progress: edits the existing message.
+/// On completion: deletes the status message and returns the final text.
+async fn send_request_with_progress(
+    socket_path: &str,
+    request: &DaemonRequest,
+    http: &reqwest::Client,
+    base_url: &str,
+    chat_id: i64,
+) -> Result<String> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .context("Failed to connect to daemon")?;
+
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let mut data = serde_json::to_string(request)?;
+    data.push('\n');
+    writer.write_all(data.as_bytes()).await?;
+
+    let mut status_msg_id: Option<i64> = None;
+
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        if line.is_empty() {
+            anyhow::bail!("Daemon disconnected");
+        }
+
+        let response: DaemonResponse =
+            serde_json::from_str(line.trim()).context("Failed to parse daemon response")?;
+
+        match response.kind {
+            ResponseKind::Done { text } => {
+                // Clean up the status message
+                if let Some(msg_id) = status_msg_id {
+                    let _ = delete_message(http, base_url, chat_id, msg_id).await;
+                }
+                return Ok(text);
+            }
+            ResponseKind::Error { message } => {
+                if let Some(msg_id) = status_msg_id {
+                    let _ = delete_message(http, base_url, chat_id, msg_id).await;
+                }
+                anyhow::bail!("{}", message);
+            }
+            ResponseKind::Progress { text: label } => match status_msg_id {
+                None => {
+                    if let Ok(msg_id) =
+                        send_message_get_id(http, base_url, chat_id, &label).await
+                    {
+                        status_msg_id = Some(msg_id);
+                    }
+                }
+                Some(msg_id) => {
+                    let _ = edit_message(http, base_url, chat_id, msg_id, &label).await;
+                }
+            },
+        }
     }
 }
 
@@ -112,7 +183,13 @@ struct TgResponse<T> {
     #[allow(dead_code)]
     ok: bool,
     result: Option<T>,
+    #[allow(dead_code)]
     description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TgSentMessage {
+    message_id: i64,
 }
 
 #[derive(Deserialize)]
@@ -194,6 +271,67 @@ async fn send_message(
         .await
         .context("Failed to send Telegram message")?;
 
+    Ok(())
+}
+
+/// Send a Telegram message and return the message_id from the API response.
+async fn send_message_get_id(
+    http: &reqwest::Client,
+    base_url: &str,
+    chat_id: i64,
+    text: &str,
+) -> Result<i64> {
+    let resp: TgResponse<TgSentMessage> = http
+        .post(format!("{}/sendMessage", base_url))
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+        }))
+        .send()
+        .await
+        .context("Failed to send Telegram message")?
+        .json()
+        .await
+        .context("Failed to parse sendMessage response")?;
+
+    resp.result
+        .map(|m| m.message_id)
+        .ok_or_else(|| anyhow::anyhow!("sendMessage returned no result"))
+}
+
+async fn edit_message(
+    http: &reqwest::Client,
+    base_url: &str,
+    chat_id: i64,
+    message_id: i64,
+    text: &str,
+) -> Result<()> {
+    http.post(format!("{}/editMessageText", base_url))
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }))
+        .send()
+        .await
+        .context("Failed to edit Telegram message")?;
+    Ok(())
+}
+
+async fn delete_message(
+    http: &reqwest::Client,
+    base_url: &str,
+    chat_id: i64,
+    message_id: i64,
+) -> Result<()> {
+    http.post(format!("{}/deleteMessage", base_url))
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+        }))
+        .send()
+        .await
+        .context("Failed to delete Telegram message")?;
     Ok(())
 }
 

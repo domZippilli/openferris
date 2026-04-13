@@ -26,7 +26,7 @@ async fn test_direct_answer() {
     let agent = Agent::new(Box::new(mock), test_registry(), String::new());
     let skill = test_skill(&["datetime"]);
 
-    let result = agent.run(&skill, "Hi", &[], "", "", "").await.unwrap();
+    let result = agent.run(&skill, "Hi", &[], "", "", "", None).await.unwrap();
 
     assert_eq!(result.response, "Hello! How can I help you?");
     assert!(result.memories.is_empty());
@@ -50,7 +50,7 @@ async fn test_single_tool_call() {
     let skill = test_skill(&["datetime"]);
 
     let result = agent
-        .run(&skill, "What time is it?", &[], "", "", "")
+        .run(&skill, "What time is it?", &[], "", "", "", None)
         .await
         .unwrap();
 
@@ -74,7 +74,7 @@ async fn test_tool_sieve_blocks_disallowed() {
     let skill = test_skill(&["datetime"]); // only datetime allowed
 
     let result = agent
-        .run(&skill, "Fetch example.com", &[], "", "", "")
+        .run(&skill, "Fetch example.com", &[], "", "", "", None)
         .await
         .unwrap();
 
@@ -91,7 +91,7 @@ async fn test_memory_extraction() {
     let skill = test_skill(&[]);
 
     let result = agent
-        .run(&skill, "I prefer dark mode", &[], "", "", "")
+        .run(&skill, "I prefer dark mode", &[], "", "", "", None)
         .await
         .unwrap();
 
@@ -122,7 +122,7 @@ async fn test_multiple_tool_calls_in_one_response() {
     let skill = test_skill(&["datetime"]);
 
     let result = agent
-        .run(&skill, "Double check the time", &[], "", "", "")
+        .run(&skill, "Double check the time", &[], "", "", "", None)
         .await
         .unwrap();
 
@@ -147,7 +147,7 @@ async fn test_max_iterations_exceeded() {
     let skill = test_skill(&["datetime"]);
 
     let err = agent
-        .run(&skill, "Loop forever", &[], "", "", "")
+        .run(&skill, "Loop forever", &[], "", "", "", None)
         .await
         .unwrap_err();
 
@@ -172,7 +172,7 @@ async fn test_tool_call_tags_stripped_from_response() {
     let skill = test_skill(&["datetime"]);
 
     let result = agent
-        .run(&skill, "test", &[], "", "", "")
+        .run(&skill, "test", &[], "", "", "", None)
         .await
         .unwrap();
 

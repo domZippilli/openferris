@@ -184,9 +184,19 @@ async fn main() -> Result<()> {
             let skill = skills::load_skill(&skill, &skills_dir)?;
 
             let agent = agent::Agent::new(llm_backend, tool_registry, soul);
+
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let progress_handle = tokio::spawn(async move {
+                while let Some(label) = progress_rx.recv().await {
+                    eprintln!("[progress] {}", label);
+                }
+            });
+
             let result = agent
-                .run(&skill, &prompt, &[], &identity, &user_profile, "")
+                .run(&skill, &prompt, &[], &identity, &user_profile, "", Some(progress_tx))
                 .await?;
+
+            progress_handle.abort();
 
             println!("=== RESPONSE ===");
             println!("{}", result.response);
