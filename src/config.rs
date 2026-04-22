@@ -120,7 +120,16 @@ pub fn allowed_directories(config: &FilesConfig) -> Vec<PathBuf> {
 }
 
 fn default_socket() -> String {
-    // Prefer XDG_RUNTIME_DIR (per-user, tmpfs, correct permissions)
+    // If a running daemon has published its socket path, trust that — it
+    // resolves env divergence (notably cron without $XDG_RUNTIME_DIR) before
+    // the client attempts to connect.
+    if let Ok(content) = std::fs::read_to_string(socket_pointer_path()) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    // Otherwise prefer XDG_RUNTIME_DIR (per-user, tmpfs, correct permissions).
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         format!("{}/openferris.sock", runtime_dir)
     } else {

@@ -158,24 +158,9 @@ async fn test_max_iterations_exceeded() {
     );
 }
 
-/// Tool call tags in the final response are stripped.
-#[tokio::test]
-async fn test_tool_call_tags_stripped_from_response() {
-    // The second response contains leftover tool_call tags that should be stripped.
-    let mock = MockLlm::new(vec![
-        r#"<tool_call>
-{"function": "datetime", "parameters": {}}
-</tool_call>"#.into(),
-        "Done.\n\n<tool_call>\n{\"broken\": true}\n</tool_call>\n\nAll good.".into(),
-    ]);
-    let agent = Agent::new(Box::new(mock), test_registry(), String::new());
-    let skill = test_skill(&["datetime"]);
-
-    let result = agent
-        .run(&skill, "test", &[], "", "", "", None)
-        .await
-        .unwrap();
-
-    assert!(!result.response.contains("<tool_call>"));
-    assert!(result.response.contains("All good"));
-}
+// Previously there was a `test_tool_call_tags_stripped_from_response` test
+// here that relied on the agent silently swallowing a malformed tool_call
+// (no `function` field) and then returning the response with stripped tags.
+// Parse failures now round-trip back to the model as a `parse_error` result,
+// so that scenario no longer reaches the final-answer path. `strip_tags` is
+// directly covered by a unit test in `agent.rs::tests::test_strip_tags`.

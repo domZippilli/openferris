@@ -61,9 +61,9 @@ impl Agent {
 
             let response = self.llm.chat_completion(&messages).await?;
             tracing::debug!("LLM response: {}", response);
-            let tool_calls = parse_tool_calls(&response);
+            let outcome = parse_tool_calls(&response);
 
-            if tool_calls.is_empty() {
+            if outcome.calls.is_empty() && outcome.errors.is_empty() {
                 // Final answer — extract memories and strip tags
                 let memories = parse_memories(&response);
                 let clean_response = strip_tags(&response);
@@ -80,7 +80,7 @@ impl Agent {
             });
 
             // Execute each tool call and feed results back
-            for call in &tool_calls {
+            for call in &outcome.calls {
                 tracing::info!("Tool call: {}", call.name);
                 tracing::debug!("Tool params: {} {}", call.name, call.params);
                 if let Some(ref tx) = progress_tx {
@@ -101,11 +101,29 @@ impl Agent {
                     }
                 };
 
+                let body = match &call.repair_note {
+                    Some(note) => format!("{}\n\n{}", note, result),
+                    None => result,
+                };
                 messages.push(ChatMessage {
                     role: Role::User,
                     content: format!(
                         "<tool_result tool=\"{}\">\n{}\n</tool_result>",
-                        call.name, result
+                        call.name, body
+                    ),
+                });
+            }
+
+            // Feed parse failures back to the model so it can self-correct
+            // instead of silently re-emitting the same malformed call.
+            for err in &outcome.errors {
+                tracing::warn!("Reporting tool_call parse error to model: {}", err.detail);
+                let snippet = error_snippet(&err.raw, &err.detail);
+                messages.push(ChatMessage {
+                    role: Role::User,
+                    content: format!(
+                        "<tool_result tool=\"parse_error\">\nOne of your <tool_call> blocks could not be parsed and was NOT executed.\n\nParser error: {}\n\nNear the error: {}\n\nFix the JSON and re-emit the tool_call. Remember: `<` and `>` are plain characters in JSON strings — never prefix with `\\`.\n</tool_result>",
+                        err.detail, snippet
                     ),
                 });
             }
@@ -181,10 +199,61 @@ impl Agent {
 struct ToolCall {
     name: String,
     params: serde_json::Value,
+    /// Set when the call's JSON required repair to parse. Prepended to the
+    /// tool_result so the model learns what was wrong and can fix next time.
+    repair_note: Option<String>,
 }
 
-fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
-    let mut calls = vec![];
+#[derive(Debug)]
+struct ParseError {
+    raw: String,
+    detail: String,
+}
+
+#[derive(Debug, Default)]
+struct ParseOutcome {
+    calls: Vec<ToolCall>,
+    errors: Vec<ParseError>,
+}
+
+/// JSON permits these chars after a backslash. Anything else is an invalid
+/// escape and the model almost certainly meant the literal char (e.g. `\>`
+/// for `>`). See strip_invalid_json_escapes.
+fn is_valid_json_escape_char(c: char) -> bool {
+    matches!(c, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u')
+}
+
+/// Walk the string and drop `\` that precedes a non-escape char. Safe to run
+/// on whole JSON blobs: legal backslashes only appear inside string literals,
+/// and elsewhere a stray `\` was already a parse error.
+fn strip_invalid_json_escapes(s: &str) -> (String, usize) {
+    let mut out = String::with_capacity(s.len());
+    let mut stripped = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek().copied() {
+                Some(next) if is_valid_json_escape_char(next) => {
+                    out.push(c);
+                    out.push(next);
+                    chars.next();
+                }
+                Some(next) => {
+                    out.push(next);
+                    chars.next();
+                    stripped += 1;
+                }
+                None => out.push(c),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    (out, stripped)
+}
+
+fn parse_tool_calls(text: &str) -> ParseOutcome {
+    let mut outcome = ParseOutcome::default();
     let mut search_from = 0;
 
     while let Some(rel_start) = text[search_from..].find("<tool_call>") {
@@ -194,18 +263,44 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
         if let Some(rel_end) = text[after_tag..].find("</tool_call>") {
             let inner = text[after_tag..after_tag + rel_end].trim();
 
-            // Try parsing as-is first, then attempt to repair truncated JSON
-            // by appending closing braces. LLMs sometimes drop trailing `}`.
+            // Repair ladder: plain parse, then closing-brace fixes for truncation,
+            // then invalid-escape stripping for `\>` / `\<` style mistakes.
+            let mut note: Option<String> = None;
             let parsed = serde_json::from_str::<serde_json::Value>(inner)
                 .or_else(|_| {
                     let mut fixed = inner.to_string();
                     fixed.push('}');
-                    serde_json::from_str::<serde_json::Value>(&fixed)
+                    let r = serde_json::from_str::<serde_json::Value>(&fixed);
+                    if r.is_ok() {
+                        note = Some(
+                            "NOTE: your tool_call JSON was missing a closing `}`; I added one. Please emit complete JSON next time."
+                                .to_string(),
+                        );
+                    }
+                    r
                 })
                 .or_else(|_| {
                     let mut fixed = inner.to_string();
                     fixed.push_str("}}");
-                    serde_json::from_str::<serde_json::Value>(&fixed)
+                    let r = serde_json::from_str::<serde_json::Value>(&fixed);
+                    if r.is_ok() {
+                        note = Some(
+                            "NOTE: your tool_call JSON was missing two closing `}`; I added them. Please emit complete JSON next time."
+                                .to_string(),
+                        );
+                    }
+                    r
+                })
+                .or_else(|_| {
+                    let (stripped, count) = strip_invalid_json_escapes(inner);
+                    let r = serde_json::from_str::<serde_json::Value>(&stripped);
+                    if r.is_ok() && count > 0 {
+                        note = Some(format!(
+                            "NOTE: your tool_call JSON contained {} invalid escape sequence(s) (e.g. `\\>` or `\\<`). I stripped the stray backslashes and ran the call. In JSON, `<` and `>` are plain characters — do not prefix them with `\\`.",
+                            count
+                        ));
+                    }
+                    r
                 });
 
             match parsed {
@@ -221,13 +316,20 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
                         .unwrap_or(serde_json::Value::Object(Default::default()));
 
                     if !name.is_empty() {
-                        calls.push(ToolCall { name, params });
+                        outcome.calls.push(ToolCall { name, params, repair_note: note });
                     } else {
-                        tracing::warn!("Tool call block has no 'function' field: {}", inner);
+                        outcome.errors.push(ParseError {
+                            raw: inner.to_string(),
+                            detail: "tool_call has no 'function' field".to_string(),
+                        });
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to parse tool call JSON: {} — raw: {}", e, inner);
+                    outcome.errors.push(ParseError {
+                        raw: inner.to_string(),
+                        detail: e.to_string(),
+                    });
                 }
             }
 
@@ -237,7 +339,34 @@ fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
         }
     }
 
-    calls
+    outcome
+}
+
+/// Build a short snippet of the raw text around a serde_json error's column.
+/// Returns the offending region with `>>` markers so the model can see exactly
+/// where it went wrong.
+fn error_snippet(raw: &str, detail: &str) -> String {
+    // Try to pull "column N" from the serde error message.
+    let col = detail
+        .split("column ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse::<usize>().ok());
+    match col {
+        Some(c) if c > 0 && c <= raw.len() => {
+            let start = c.saturating_sub(20);
+            let end = (c + 20).min(raw.len());
+            format!(
+                "...{}>>HERE>>{}...",
+                &raw[start..c.saturating_sub(1)],
+                &raw[c.saturating_sub(1)..end]
+            )
+        }
+        _ => {
+            let end = raw.len().min(80);
+            format!("{}{}", &raw[..end], if raw.len() > 80 { "..." } else { "" })
+        }
+    }
 }
 
 // --- Memory tag parser ---
@@ -289,7 +418,9 @@ mod tests {
     #[test]
     fn test_parse_tool_calls_none() {
         let text = "Here is your answer. No tools needed.";
-        assert!(parse_tool_calls(text).is_empty());
+        let outcome = parse_tool_calls(text);
+        assert!(outcome.calls.is_empty());
+        assert!(outcome.errors.is_empty());
     }
 
     #[test]
@@ -299,9 +430,10 @@ mod tests {
 <tool_call>
 {"function": "datetime", "parameters": {}}
 </tool_call>"#;
-        let calls = parse_tool_calls(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "datetime");
+        let outcome = parse_tool_calls(text);
+        assert_eq!(outcome.calls.len(), 1);
+        assert_eq!(outcome.calls[0].name, "datetime");
+        assert!(outcome.calls[0].repair_note.is_none());
     }
 
     #[test]
@@ -315,10 +447,48 @@ mod tests {
 <tool_call>
 {"function": "weather", "parameters": {"zip": "10001"}}
 </tool_call>"#;
-        let calls = parse_tool_calls(text);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].name, "datetime");
-        assert_eq!(calls[1].name, "weather");
+        let outcome = parse_tool_calls(text);
+        assert_eq!(outcome.calls.len(), 2);
+        assert_eq!(outcome.calls[0].name, "datetime");
+        assert_eq!(outcome.calls[1].name, "weather");
+    }
+
+    #[test]
+    fn test_repairs_invalid_escape_in_html() {
+        // The real-world bug: model emits `<h2\>` inside a JSON string.
+        let text = "<tool_call>\n{\"function\": \"send_email\", \"parameters\": {\"body\": \"<h2\\>hi</h2>\"}}\n</tool_call>";
+        let outcome = parse_tool_calls(text);
+        assert_eq!(outcome.calls.len(), 1);
+        assert_eq!(outcome.calls[0].name, "send_email");
+        let note = outcome.calls[0].repair_note.as_deref().unwrap_or("");
+        assert!(note.contains("invalid escape"), "note was: {}", note);
+        assert_eq!(
+            outcome.calls[0].params.get("body").and_then(|v| v.as_str()),
+            Some("<h2>hi</h2>")
+        );
+    }
+
+    #[test]
+    fn test_parse_error_reported_when_unrepairable() {
+        let text = "<tool_call>\n{this is not json at all\n</tool_call>";
+        let outcome = parse_tool_calls(text);
+        assert!(outcome.calls.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(!outcome.errors[0].detail.is_empty());
+    }
+
+    #[test]
+    fn test_strip_invalid_json_escapes() {
+        let (out, count) = strip_invalid_json_escapes(r#"<h2\>hi\n</h2>"#);
+        assert_eq!(out, r#"<h2>hi\n</h2>"#);
+        assert_eq!(count, 1); // `\>` stripped, `\n` kept (valid escape)
+    }
+
+    #[test]
+    fn test_error_snippet_marks_column() {
+        let raw = "abcdefghijklmnopqrstuvwxyzABCDEFG";
+        let snippet = error_snippet(raw, "something at line 1 column 10 blah");
+        assert!(snippet.contains(">>HERE>>"));
     }
 
     #[test]
@@ -360,9 +530,13 @@ mod tests {
         let text = r#"<tool_call>
 {"function": "send_telegram", "parameters": {"message": "hello"}
 </tool_call>"#;
-        let calls = parse_tool_calls(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "send_telegram");
+        let outcome = parse_tool_calls(text);
+        assert_eq!(outcome.calls.len(), 1);
+        assert_eq!(outcome.calls[0].name, "send_telegram");
+        assert!(
+            outcome.calls[0].repair_note.as_deref().unwrap_or("").contains("closing"),
+            "expected a closing-brace repair note"
+        );
     }
 
     #[test]
@@ -370,8 +544,8 @@ mod tests {
         let text = r#"<tool_call>
 {"function": "send_telegram", "parameters": {"message": "hello"
 </tool_call>"#;
-        let calls = parse_tool_calls(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "send_telegram");
+        let outcome = parse_tool_calls(text);
+        assert_eq!(outcome.calls.len(), 1);
+        assert_eq!(outcome.calls[0].name, "send_telegram");
     }
 }
