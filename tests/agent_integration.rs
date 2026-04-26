@@ -164,3 +164,44 @@ async fn test_max_iterations_exceeded() {
 // Parse failures now round-trip back to the model as a `parse_error` result,
 // so that scenario no longer reaches the final-answer path. `strip_tags` is
 // directly covered by a unit test in `agent.rs::tests::test_strip_tags`.
+
+/// Compaction fires when the conversation exceeds the budget.
+/// Strategy: a tiny n_ctx + a huge assistant response forces the budget check
+/// to trigger between turns 2 and 3. If compaction fires, it consumes one
+/// extra scripted response (the summary), so the final answer comes from
+/// response[3] not response[2].
+#[tokio::test]
+async fn test_compaction_fires_when_over_budget() {
+    let big_pad = "x".repeat(20_000);
+    let mock = MockLlm::with_n_ctx(
+        vec![
+            // Turn 1: tool call
+            r#"<tool_call>
+{"function": "datetime", "parameters": {}}
+</tool_call>"#
+                .into(),
+            // Turn 2: another tool call, but with massive padding to blow budget
+            format!(
+                "{}\n<tool_call>\n{{\"function\": \"datetime\", \"parameters\": {{}}}}\n</tool_call>",
+                big_pad
+            ),
+            // Compaction's summarization call consumes this:
+            "Summary: user asked for time; datetime was called twice.".into(),
+            // Final answer (only reached if compaction fired and freed budget):
+            "POST_COMPACTION_FINAL".into(),
+        ],
+        1_000, // n_ctx in tokens; threshold = 800 tokens ≈ 3200 chars
+    );
+    let agent = Agent::new(Box::new(mock), test_registry(), String::new());
+    let skill = test_skill(&["datetime"]);
+
+    let result = agent
+        .run(&skill, "What time is it?", &[], "", "", "", None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.response, "POST_COMPACTION_FINAL",
+        "expected the final response after compaction; got something else, suggesting compaction did not fire"
+    );
+}

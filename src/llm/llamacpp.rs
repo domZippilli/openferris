@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
 
 use super::{ChatMessage, LlmBackend};
 
@@ -10,6 +11,9 @@ pub struct LlamaCppBackend {
     endpoint: String,
     model: Option<String>,
     slot: i32,
+    /// Per-slot context window discovered from the server's `/props` endpoint.
+    /// Cached after first successful fetch; never refreshed within a process.
+    n_ctx: OnceCell<usize>,
 }
 
 #[derive(Serialize)]
@@ -65,8 +69,20 @@ impl LlamaCppBackend {
             endpoint,
             model,
             slot,
+            n_ctx: OnceCell::new(),
         })
     }
+}
+
+#[derive(Deserialize)]
+struct PropsResponse {
+    /// Per-slot context size, e.g. 100096 for `-c 200000 -np 2`.
+    default_generation_settings: PropsGeneration,
+}
+
+#[derive(Deserialize)]
+struct PropsGeneration {
+    n_ctx: usize,
 }
 
 #[async_trait]
@@ -134,5 +150,29 @@ impl LlmBackend for LlamaCppBackend {
         }
 
         Ok(choice.message.content)
+    }
+
+    async fn context_window_tokens(&self) -> Result<usize> {
+        if let Some(&n) = self.n_ctx.get() {
+            return Ok(n);
+        }
+        let url = format!("{}/props", self.endpoint.trim_end_matches('/'));
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to fetch /props from llama-server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            anyhow::bail!("llama.cpp /props returned HTTP {}", status);
+        }
+        let props: PropsResponse = resp
+            .json()
+            .await
+            .context("Failed to parse /props response")?;
+        let n = props.default_generation_settings.n_ctx;
+        let _ = self.n_ctx.set(n);
+        Ok(n)
     }
 }

@@ -7,6 +7,17 @@ use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 
 const MAX_ITERATIONS: usize = 50;
+/// Compact when estimated token count exceeds this fraction of the slot's
+/// context window. The summarization call is an independent request (its own
+/// 100% budget) so this threshold is really about headroom for the *next*
+/// agent turn after compaction kicks the middle out.
+const COMPACTION_THRESHOLD: f32 = 0.90;
+/// Number of trailing (assistant + tool_result) pairs to keep verbatim. The
+/// summary replaces everything older than this.
+const KEEP_RECENT_PAIRS: usize = 3;
+/// A run can compact at most this many times. Past that, something is wrong
+/// (runaway tool output, infinite loop) and bailing is safer than masking it.
+const MAX_COMPACTIONS: usize = 3;
 
 #[derive(Clone, Debug)]
 pub struct AgentResult {
@@ -59,8 +70,39 @@ impl Agent {
             content: user_message.to_string(),
         });
 
+        // Discover the slot context window once per run (cached in the backend).
+        let n_ctx = match self.llm.context_window_tokens().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("Could not query context window: {}; falling back to 100_000", e);
+                100_000
+            }
+        };
+        let budget = ((n_ctx as f32) * COMPACTION_THRESHOLD) as usize;
+        let mut compactions_done = 0usize;
+
         for iteration in 0..MAX_ITERATIONS {
             tracing::debug!("Agent iteration {}", iteration + 1);
+
+            // Compact before each LLM call if we've exceeded budget.
+            if compactions_done < MAX_COMPACTIONS && estimate_tokens(&messages) > budget {
+                let before = estimate_tokens(&messages);
+                match self.compact(&messages).await {
+                    Ok(new_messages) => {
+                        let after = estimate_tokens(&new_messages);
+                        tracing::info!(
+                            "Compacted context: {} -> {} tokens (compaction {}/{})",
+                            before, after, compactions_done + 1, MAX_COMPACTIONS
+                        );
+                        messages = new_messages;
+                        compactions_done += 1;
+                    }
+                    Err(e) => {
+                        tracing::error!("Compaction failed: {}", e);
+                        return Err(e);
+                    }
+                }
+            }
 
             let response = self.llm.chat_completion(&messages).await?;
             tracing::debug!("LLM response: {}", response);
@@ -135,6 +177,82 @@ impl Agent {
         anyhow::bail!("Agent exceeded maximum iterations ({})", MAX_ITERATIONS)
     }
 
+    /// Summarize the middle of `messages`, preserving the system prompt, the
+    /// original user message (index 1, after history is folded in), and the
+    /// last KEEP_RECENT_PAIRS (assistant + tool_result) pairs verbatim. The
+    /// summary is produced by the same LLM backend.
+    async fn compact(&self, messages: &[ChatMessage]) -> Result<Vec<ChatMessage>> {
+        if messages.len() < 4 {
+            // Nothing meaningful to compact.
+            return Ok(messages.to_vec());
+        }
+
+        // Walk backward from the end. Each Assistant message marks the start
+        // of a (assistant + its tool_results) pair. Stop once we've identified
+        // the index of the KEEP_RECENT_PAIRS-th assistant from the end —
+        // that's the boundary we keep verbatim.
+        let mut keep_start = messages.len();
+        let mut pairs_seen = 0usize;
+        for (i, m) in messages.iter().enumerate().rev() {
+            if matches!(m.role, Role::Assistant) {
+                pairs_seen += 1;
+                if pairs_seen == KEEP_RECENT_PAIRS {
+                    keep_start = i;
+                    break;
+                }
+            }
+        }
+
+        // Index 0 = system, index 1 = first user message; we always preserve
+        // them so the model retains the task framing.
+        let preserved_head_end = 2usize;
+        if keep_start <= preserved_head_end {
+            // Either fewer than KEEP_RECENT_PAIRS pairs exist, or all of them
+            // are in the head we're already preserving. Nothing to summarize.
+            return Ok(messages.to_vec());
+        }
+        let to_summarize = &messages[preserved_head_end..keep_start];
+
+        let mut transcript = String::new();
+        for m in to_summarize {
+            transcript.push_str(&format!("[{}]\n{}\n\n", m.role.as_str(), m.content));
+        }
+
+        let summarization_messages = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "You are summarizing a transcript of an AI agent's working session so the agent can keep working with reduced context. Preserve: (1) the user's original goal, (2) facts the agent has gathered from tool calls (URLs visited, data retrieved, decisions made), (3) any errors or dead-ends to avoid repeating, (4) the agent's current plan or next step. Omit: chain-of-thought reasoning, redundant tool result text, formatting boilerplate. Output ONLY the summary, no preamble.".to_string(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: format!(
+                    "Transcript to summarize:\n\n{}\n\nProduce the summary now.",
+                    transcript
+                ),
+            },
+        ];
+
+        let summary = self
+            .llm
+            .chat_completion(&summarization_messages)
+            .await?;
+
+        let summary_msg = ChatMessage {
+            role: Role::User,
+            content: format!(
+                "<context_summary>\nEarlier turns of this session were compacted to save context. Summary follows:\n\n{}\n</context_summary>",
+                summary.trim()
+            ),
+        };
+
+        let mut out =
+            Vec::with_capacity(preserved_head_end + 1 + (messages.len() - keep_start));
+        out.extend_from_slice(&messages[..preserved_head_end]);
+        out.push(summary_msg);
+        out.extend_from_slice(&messages[keep_start..]);
+        Ok(out)
+    }
+
     fn build_system_prompt(&self, skill: &Skill, identity: &str, user_profile: &str, persistent_context: &str) -> String {
         let tool_descriptions = self.tools.get_descriptions(&skill.tools);
 
@@ -199,6 +317,13 @@ impl Agent {
 
         prompt
     }
+}
+
+/// Rough token estimate from char count. Real tokenization would round-trip
+/// through the model's tokenizer; this is a guardrail, not a billing oracle,
+/// so chars/4 (the standard English heuristic) is plenty.
+fn estimate_tokens(messages: &[ChatMessage]) -> usize {
+    messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
 }
 
 // --- Tool call parser ---

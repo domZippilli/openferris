@@ -11,13 +11,21 @@ use super::{ChatMessage, LlmBackend};
 pub struct MockLlm {
     responses: Mutex<VecDeque<String>>,
     call_log: Mutex<Vec<Vec<ChatMessage>>>,
+    /// What `context_window_tokens` returns. Tests that exercise compaction
+    /// pass a small value to force the threshold.
+    n_ctx: usize,
 }
 
 impl MockLlm {
     pub fn new(responses: Vec<String>) -> Self {
+        Self::with_n_ctx(responses, 1_000_000)
+    }
+
+    pub fn with_n_ctx(responses: Vec<String>, n_ctx: usize) -> Self {
         Self {
             responses: Mutex::new(responses.into()),
             call_log: Mutex::new(vec![]),
+            n_ctx,
         }
     }
 
@@ -41,5 +49,9 @@ impl LlmBackend for MockLlm {
             .unwrap()
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("MockLlm: no more scripted responses"))
+    }
+
+    async fn context_window_tokens(&self) -> Result<usize> {
+        Ok(self.n_ctx)
     }
 }
