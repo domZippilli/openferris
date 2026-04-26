@@ -19,6 +19,10 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description_for_llm(&self) -> &str;
     async fn execute(&self, params: serde_json::Value) -> Result<String>;
+    /// Called by the agent at the start of every Agent::run(). Tools that
+    /// hold per-run state (e.g. a Claude session id for multi-turn ask_claude)
+    /// reset it here. Default: no-op.
+    fn on_run_start(&self) {}
 }
 
 pub struct ToolRegistry {
@@ -44,6 +48,14 @@ impl ToolRegistry {
             .filter(|t| allowed.contains(&t.name().to_string()))
             .map(|t| (t.name(), t.description_for_llm()))
             .collect()
+    }
+
+    /// Notify all tools that a new agent run is starting. Tools holding
+    /// per-run state reset it here.
+    pub fn notify_run_start(&self) {
+        for tool in self.tools.values() {
+            tool.on_run_start();
+        }
     }
 
     /// Execute a tool, enforcing the sieve
@@ -79,7 +91,7 @@ impl ToolRegistry {
         self.register(Box::new(schedule::ScheduleTool));
         self.register(Box::new(gws::GwsTool));
         self.register(Box::new(logs::JournalLogsTool));
-        self.register(Box::new(ask_claude::AskClaudeTool));
+        self.register(Box::new(ask_claude::AskClaudeTool::new()));
 
         if let Some(ref tg) = config.telegram {
             self.register(Box::new(telegram::SendTelegramTool::new(

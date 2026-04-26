@@ -40,6 +40,9 @@ impl Agent {
         persistent_context: &str,
         progress_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> Result<AgentResult> {
+        // Reset any per-run state held by tools (e.g. ask_claude session id).
+        self.tools.notify_run_start();
+
         let system_prompt = self.build_system_prompt(skill, identity, user_profile, persistent_context);
 
         let mut messages = vec![ChatMessage {
@@ -180,6 +183,11 @@ impl Agent {
             prompt.push_str("</tool_call>\n\n");
             prompt.push_str("The system will execute the tool and return the result in a <tool_result> block.\n");
             prompt.push_str("You may call tools multiple times. When you have all the information you need, respond with your final answer without any <tool_call> blocks.\n\n");
+            prompt.push_str("## Act, do not announce\n\n");
+            prompt.push_str("If you intend to use a tool, emit the <tool_call> block in the SAME response. Do not say \"I will now do X\" or \"let me check Y\" without including the corresponding <tool_call> in that turn — if you only describe the action, the loop ends and the action never happens. Either:\n");
+            prompt.push_str("- Take the action: emit the <tool_call> block (with or without brief prose), or\n");
+            prompt.push_str("- Decline / finish: state your final answer with no <tool_call>.\n\n");
+            prompt.push_str("Never end a turn with an unfulfilled commitment like \"next, I'll...\" — finish the work in this turn or in a subsequent turn that actually contains the call.\n\n");
         }
 
         // Memory instructions
