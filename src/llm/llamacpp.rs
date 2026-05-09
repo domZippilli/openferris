@@ -1,10 +1,23 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 
-use super::{ChatMessage, LlmBackend};
+use super::{ChatMessage, ChunkCallback, LlmBackend};
+
+/// Linear search for `needle` in `haystack`. Used to find the SSE message
+/// delimiter (`\n\n`) inside a raw byte buffer. Buffer sizes here are small
+/// (a few KB at most between drains), so a naive scan is fine.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
+}
 
 pub struct LlamaCppBackend {
     client: Client,
@@ -26,6 +39,30 @@ struct ChatRequest {
     /// Override the server's default n_predict. -1 = unlimited.
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<i32>,
+    /// Server-Sent Events streaming of generated tokens. Only set when the
+    /// caller wants per-chunk delivery; non-streaming callers omit it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
+}
+
+#[derive(Deserialize)]
+struct StreamChunk {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: StreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -108,6 +145,7 @@ impl LlmBackend for LlamaCppBackend {
             messages: api_messages,
             id_slot: Some(self.slot),
             max_tokens: Some(-1),
+            stream: false,
         };
 
         let url = format!(
@@ -157,6 +195,127 @@ impl LlmBackend for LlamaCppBackend {
         }
 
         Ok(choice.message.content)
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        messages: &[ChatMessage],
+        on_chunk: ChunkCallback<'_>,
+    ) -> Result<String> {
+        let api_messages: Vec<ApiMessage> = messages
+            .iter()
+            .map(|m| ApiMessage {
+                role: m.role.as_str().to_string(),
+                content: m.content.clone(),
+            })
+            .collect();
+
+        let request = ChatRequest {
+            model: self.model.clone().unwrap_or_else(|| "default".to_string()),
+            messages: api_messages,
+            id_slot: Some(self.slot),
+            max_tokens: Some(-1),
+            stream: true,
+        };
+
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.endpoint.trim_end_matches('/')
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Accept", "text/event-stream")
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to connect to llama.cpp server")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("llama.cpp returned HTTP {}: {}", status, body);
+        }
+
+        let mut stream = response.bytes_stream();
+        // SSE messages are separated by a blank line ("\n\n"). A single TCP
+        // chunk may contain multiple messages, a fragment of one, or a split
+        // straddling the delimiter (or even mid-UTF-8-codepoint) — so we
+        // accumulate raw bytes here and peel off complete messages one at
+        // a time, only attempting UTF-8 decode on whole messages.
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut accumulated = String::new();
+        let mut final_finish_reason: Option<String> = None;
+        let mut done = false;
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.context("Error reading streaming response from llama.cpp")?;
+            buffer.extend_from_slice(&bytes);
+
+            while let Some(idx) = find_subslice(&buffer, b"\n\n") {
+                let raw: Vec<u8> = buffer.drain(..idx + 2).collect();
+                let message_bytes = &raw[..raw.len() - 2];
+                let message = std::str::from_utf8(message_bytes)
+                    .context("llama.cpp SSE message was not valid UTF-8")?;
+
+                // An SSE message is one or more lines; each `data:` line
+                // contributes one logical payload. llama.cpp packs the JSON
+                // onto a single line, but be permissive in case of folding.
+                let mut payload = String::new();
+                for line in message.lines() {
+                    if let Some(rest) = line.strip_prefix("data:") {
+                        if !payload.is_empty() {
+                            payload.push('\n');
+                        }
+                        payload.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+                    }
+                    // Other SSE fields (event:, id:, retry:, comments) are ignored.
+                }
+
+                if payload.is_empty() {
+                    continue;
+                }
+                if payload == "[DONE]" {
+                    done = true;
+                    break;
+                }
+
+                let parsed: StreamChunk = match serde_json::from_str(&payload) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse SSE chunk: {} (payload: {})", e, payload);
+                        continue;
+                    }
+                };
+
+                if let Some(choice) = parsed.choices.into_iter().next() {
+                    if let Some(reason) = choice.finish_reason {
+                        final_finish_reason = Some(reason);
+                    }
+                    if let Some(content) = choice.delta.content {
+                        if !content.is_empty() {
+                            on_chunk(&content);
+                            accumulated.push_str(&content);
+                        }
+                    }
+                }
+            }
+
+            if done {
+                break;
+            }
+        }
+
+        if let Some(reason) = &final_finish_reason {
+            if reason == "length" {
+                tracing::warn!(
+                    "LLM output truncated (finish_reason=length) — response may be incomplete"
+                );
+            }
+        }
+
+        Ok(accumulated)
     }
 
     async fn context_window_tokens(&self) -> Result<usize> {

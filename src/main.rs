@@ -185,16 +185,31 @@ async fn main() -> Result<()> {
 
             let agent = agent::Agent::new(llm_backend, tool_registry, soul);
 
-            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let (progress_tx, mut progress_rx) =
+                tokio::sync::mpsc::unbounded_channel::<openferris::protocol::AgentNotification>();
             let progress_handle = tokio::spawn(async move {
-                while let Some(label) = progress_rx.recv().await {
-                    eprintln!("[progress] {}", label);
+                use openferris::protocol::AgentNotification;
+                while let Some(notif) = progress_rx.recv().await {
+                    match notif {
+                        AgentNotification::ToolProgress(label) => {
+                            eprintln!("[progress] {}", label);
+                        }
+                        AgentNotification::AssistantChunk(text) => {
+                            // Stream chunks to stderr so they appear live without
+                            // disrupting the final stdout response.
+                            eprint!("{}", text);
+                            use std::io::Write;
+                            let _ = std::io::stderr().flush();
+                        }
+                    }
                 }
             });
 
             let result = agent
                 .run(&skill, &prompt, &[], &identity, &user_profile, "", Some(progress_tx))
                 .await?;
+            // Terminate the streamed line so the final response prints cleanly.
+            eprintln!();
 
             progress_handle.abort();
 

@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::{ChatMessage, LlmBackend};
+use super::{ChatMessage, ChunkCallback, LlmBackend};
 
 /// A mock LLM backend that returns pre-scripted responses in FIFO order.
 /// Useful for deterministic testing of the agent loop.
@@ -51,7 +51,57 @@ impl LlmBackend for MockLlm {
             .ok_or_else(|| anyhow::anyhow!("MockLlm: no more scripted responses"))
     }
 
+    /// Streams the next scripted response as whitespace-delimited chunks.
+    /// Uses `split_inclusive(' ')` so trailing spaces are preserved on each
+    /// chunk, meaning concatenating all chunks yields the original string
+    /// byte-for-byte. Falls back to a single chunk for empty responses.
+    async fn chat_completion_stream(
+        &self,
+        messages: &[ChatMessage],
+        on_chunk: ChunkCallback<'_>,
+    ) -> Result<String> {
+        let full = self.chat_completion(messages).await?;
+        let mut accumulated = String::with_capacity(full.len());
+        if full.is_empty() {
+            on_chunk(&full);
+        } else {
+            for piece in full.split_inclusive(' ') {
+                on_chunk(piece);
+                accumulated.push_str(piece);
+            }
+            debug_assert_eq!(accumulated, full);
+        }
+        Ok(full)
+    }
+
     async fn context_window_tokens(&self) -> Result<usize> {
         Ok(self.n_ctx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn chat_completion_stream_emits_word_chunks() {
+        let scripted = "hello world how are you".to_string();
+        let mock = MockLlm::new(vec![scripted.clone()]);
+
+        let mut chunks: Vec<String> = Vec::new();
+        let mut cb = |chunk: &str| chunks.push(chunk.to_string());
+        let returned = mock
+            .chat_completion_stream(&[], &mut cb)
+            .await
+            .expect("stream should succeed");
+
+        assert!(
+            chunks.len() > 1,
+            "expected multiple streamed chunks, got {}: {:?}",
+            chunks.len(),
+            chunks
+        );
+        assert_eq!(chunks.concat(), scripted);
+        assert_eq!(returned, scripted);
     }
 }

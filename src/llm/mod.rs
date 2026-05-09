@@ -26,9 +26,28 @@ impl Role {
     }
 }
 
+/// Callback invoked for each text chunk as it streams in. Backends that
+/// support real streaming call this many times per response; the default
+/// (buffered) impl calls it exactly once with the full content.
+pub type ChunkCallback<'a> = &'a mut (dyn FnMut(&str) + Send);
+
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
     async fn chat_completion(&self, messages: &[ChatMessage]) -> anyhow::Result<String>;
+
+    /// Streaming variant. Invokes `on_chunk` with text fragments as they
+    /// arrive; returns the full accumulated content on success. Default impl
+    /// buffers (calls `chat_completion` and emits one chunk) so backends can
+    /// opt in to real streaming without breaking compilation.
+    async fn chat_completion_stream(
+        &self,
+        messages: &[ChatMessage],
+        on_chunk: ChunkCallback<'_>,
+    ) -> anyhow::Result<String> {
+        let full = self.chat_completion(messages).await?;
+        on_chunk(&full);
+        Ok(full)
+    }
 
     /// Per-slot context window size in tokens. Backends that talk to a server
     /// (llama.cpp) discover this at runtime; mocks and offline backends return

@@ -66,6 +66,15 @@ pub async fn run(daemon_address: String, tg_config: TelegramConfig) -> Result<()
                 handle_message(&text, &daemon_address, &http, &base_url, chat_id).await;
             typing_handle.abort();
 
+            // If streaming already rendered the final reply via live edits to
+            // a dedicated message, `handle_message` returns an empty string —
+            // skip sending another copy. Otherwise, fall back to the buffered
+            // send path (e.g. backend didn't stream, or response was empty
+            // assistant text wrapping a tool-call only flow).
+            if response.is_empty() {
+                continue;
+            }
+
             // Telegram has a 4096 char message limit
             for chunk in chunk_message(&response, 4096) {
                 if let Err(e) = send_message(&http, &base_url, chat_id, chunk).await {
@@ -112,10 +121,44 @@ async fn handle_message(
     }
 }
 
-/// Send a daemon request and forward progress updates as Telegram status messages.
-/// On first progress: sends a new message and records its ID.
-/// On subsequent progress: edits the existing message.
-/// On completion: deletes the status message and returns the final text.
+/// Telegram messages are capped at 4096 chars. We leave a little headroom for
+/// the truncation marker.
+const TG_MSG_LIMIT: usize = 4096;
+/// Minimum gap between successive `editMessageText` calls for the streaming
+/// message. Telegram tolerates ~1 edit/sec; 1.5s is a safe ceiling that keeps
+/// the UX feeling live without tripping flood limits on long replies.
+const STREAM_EDIT_DEBOUNCE_MS: u128 = 1500;
+
+/// Truncate `s` to fit in a single Telegram message, appending an ellipsis if
+/// we had to cut. Splits at a char boundary so we never produce invalid UTF-8.
+fn truncate_for_telegram(s: &str) -> String {
+    if s.len() <= TG_MSG_LIMIT {
+        return s.to_string();
+    }
+    const MARKER: &str = "\n\n[truncated]";
+    let budget = TG_MSG_LIMIT.saturating_sub(MARKER.len());
+    let mut end = budget.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + MARKER.len());
+    out.push_str(&s[..end]);
+    out.push_str(MARKER);
+    out
+}
+
+/// Send a daemon request and forward progress + streamed chunks to Telegram.
+///
+/// Two distinct messages are managed in parallel:
+///   * `status_msg_id` — the "Working..." / "Reading a file..." status line,
+///     edited on each `Progress` and deleted on `Done`/`Error`.
+///   * `chunk_msg_id`  — the live-streaming assistant prose message, sent on
+///     the first `AssistantChunk`, edited (debounced) thereafter, and given a
+///     final edit on `Done`. This message is the user's final reply.
+///
+/// Returns the final assistant text only when no streaming message was
+/// rendered (caller sends it as a fresh message). When streaming did render
+/// the reply in place, returns an empty string and the caller skips the send.
 async fn send_request_with_progress(
     socket_path: &str,
     request: &DaemonRequest,
@@ -135,6 +178,9 @@ async fn send_request_with_progress(
     writer.write_all(data.as_bytes()).await?;
 
     let mut status_msg_id: Option<i64> = None;
+    let mut chunk_msg_id: Option<i64> = None;
+    let mut chunk_buffer = String::new();
+    let mut last_edit: Option<std::time::Instant> = None;
 
     loop {
         let mut line = String::new();
@@ -148,14 +194,38 @@ async fn send_request_with_progress(
 
         match response.kind {
             ResponseKind::Done { text } => {
-                // Clean up the status message
+                // Clean up the status message regardless.
                 if let Some(msg_id) = status_msg_id {
                     let _ = delete_message(http, base_url, chat_id, msg_id).await;
                 }
+
+                if let Some(msg_id) = chunk_msg_id {
+                    // We already rendered (most of) the reply via streaming.
+                    // Do a final edit so the message reflects the canonical
+                    // final text (which may differ slightly from the buffered
+                    // chunks — e.g. tool-call markup stripped, trailing
+                    // whitespace cleaned). Only edit when there's something
+                    // to show; if `text` is empty, leave the streamed buffer
+                    // in place rather than blanking the message.
+                    if !text.is_empty() {
+                        let final_text = truncate_for_telegram(&text);
+                        let _ = edit_message(http, base_url, chat_id, msg_id, &final_text).await;
+                    }
+                    // Sentinel: caller should NOT send `text` as a new
+                    // message — the streamed message is the reply.
+                    return Ok(String::new());
+                }
+
                 return Ok(text);
             }
             ResponseKind::Error { message } => {
                 if let Some(msg_id) = status_msg_id {
+                    let _ = delete_message(http, base_url, chat_id, msg_id).await;
+                }
+                // Clean up any half-rendered streaming message so the user
+                // isn't left looking at a partial reply when we surface the
+                // error.
+                if let Some(msg_id) = chunk_msg_id {
                     let _ = delete_message(http, base_url, chat_id, msg_id).await;
                 }
                 anyhow::bail!("{}", message);
@@ -172,6 +242,42 @@ async fn send_request_with_progress(
                     let _ = edit_message(http, base_url, chat_id, msg_id, &label).await;
                 }
             },
+            ResponseKind::AssistantChunk { text } => {
+                chunk_buffer.push_str(&text);
+
+                match chunk_msg_id {
+                    None => {
+                        // First chunk: send a new message we'll edit going
+                        // forward. If the send fails (rate limit, network),
+                        // drop the chunk silently — `Done` will still produce
+                        // a fallback buffered send.
+                        let initial = truncate_for_telegram(&chunk_buffer);
+                        if !initial.is_empty()
+                            && let Ok(msg_id) =
+                                send_message_get_id(http, base_url, chat_id, &initial).await
+                        {
+                            chunk_msg_id = Some(msg_id);
+                            last_edit = Some(std::time::Instant::now());
+                        }
+                    }
+                    Some(msg_id) => {
+                        // Debounce: only edit when enough time has passed
+                        // since the previous edit. This bounds our edit rate
+                        // to ~1 every 1.5s regardless of how fast chunks
+                        // arrive.
+                        let due = match last_edit {
+                            None => true,
+                            Some(t) => t.elapsed().as_millis() >= STREAM_EDIT_DEBOUNCE_MS,
+                        };
+                        if due {
+                            let body = truncate_for_telegram(&chunk_buffer);
+                            let _ =
+                                edit_message(http, base_url, chat_id, msg_id, &body).await;
+                            last_edit = Some(std::time::Instant::now());
+                        }
+                    }
+                }
+            }
         }
     }
 }

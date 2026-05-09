@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use openferris::agent::{Agent, AgentResult};
 use openferris::config::{self, AppConfig};
 use openferris::llm::{ChatMessage, Role};
-use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
+use openferris::protocol::{AgentNotification, DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
 use openferris::skills;
 use openferris::storage::Storage;
 
@@ -18,7 +18,7 @@ struct QueuedRequest {
     request: DaemonRequest,
     session_history: Vec<ChatMessage>,
     response_tx: oneshot::Sender<DaemonResponse>,
-    progress_tx: mpsc::UnboundedSender<String>,
+    progress_tx: mpsc::UnboundedSender<AgentNotification>,
 }
 
 /// Data needed to log an interaction after the agent finishes.
@@ -203,7 +203,7 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
 
                         let request_id = request.id.clone();
                         let (resp_tx, resp_rx) = oneshot::channel();
-                        let (prog_tx, mut prog_rx) = mpsc::unbounded_channel::<String>();
+                        let (prog_tx, mut prog_rx) = mpsc::unbounded_channel::<AgentNotification>();
                         let queued = QueuedRequest {
                             request,
                             session_history: if is_freeform {
@@ -227,21 +227,21 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
                         let mut finished = false;
                         while !finished {
                             tokio::select! {
-                                Some(label) = prog_rx.recv() => {
-                                    let progress = DaemonResponse {
+                                Some(notif) = prog_rx.recv() => {
+                                    let resp = DaemonResponse {
                                         request_id: request_id.clone(),
-                                        kind: ResponseKind::Progress { text: label },
+                                        kind: notification_to_response_kind(notif),
                                     };
-                                    let _ = write_response(&mut writer, &progress).await;
+                                    let _ = write_response(&mut writer, &resp).await;
                                 }
                                 result = &mut resp_rx => {
-                                    // Drain any remaining progress messages
-                                    while let Ok(label) = prog_rx.try_recv() {
-                                        let progress = DaemonResponse {
+                                    // Drain any remaining notifications
+                                    while let Ok(notif) = prog_rx.try_recv() {
+                                        let resp = DaemonResponse {
                                             request_id: request_id.clone(),
-                                            kind: ResponseKind::Progress { text: label },
+                                            kind: notification_to_response_kind(notif),
                                         };
-                                        let _ = write_response(&mut writer, &progress).await;
+                                        let _ = write_response(&mut writer, &resp).await;
                                     }
                                     match result {
                                         Ok(response) => {
@@ -280,6 +280,13 @@ pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Me
     }
 }
 
+fn notification_to_response_kind(n: AgentNotification) -> ResponseKind {
+    match n {
+        AgentNotification::ToolProgress(text) => ResponseKind::Progress { text },
+        AgentNotification::AssistantChunk(text) => ResponseKind::AssistantChunk { text },
+    }
+}
+
 async fn write_response(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     response: &DaemonResponse,
@@ -299,7 +306,7 @@ async fn process_request(
     identity: &str,
     user_profile: &str,
     persistent_context: &str,
-    progress_tx: mpsc::UnboundedSender<String>,
+    progress_tx: mpsc::UnboundedSender<AgentNotification>,
 ) -> (DaemonResponse, Option<LogData>) {
     let request_id = queued.request.id.clone();
     let source = queued

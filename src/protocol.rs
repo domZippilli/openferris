@@ -32,6 +32,19 @@ pub enum ResponseKind {
     Error { message: String },
     /// Intermediate progress update sent while the agent is working.
     Progress { text: String },
+    /// A streamed chunk of assistant prose. Multiple of these arrive between
+    /// the request and the final `Done`. Clients should append/coalesce.
+    AssistantChunk { text: String },
+}
+
+/// In-process notification carried on the agent→daemon channel. The daemon
+/// translates each variant to the appropriate wire `ResponseKind`.
+#[derive(Debug, Clone)]
+pub enum AgentNotification {
+    /// Tool invocation about to start, e.g. "Checking the time...".
+    ToolProgress(String),
+    /// Streamed text chunk from the LLM (assistant prose, not tool-call markup).
+    AssistantChunk(String),
 }
 
 /// Map internal tool names to human-friendly progress labels.

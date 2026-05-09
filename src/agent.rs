@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::llm::{ChatMessage, LlmBackend, Role};
-use crate::protocol::tool_progress_label;
+use crate::protocol::{tool_progress_label, AgentNotification};
 use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 
@@ -49,7 +49,7 @@ impl Agent {
         identity: &str,
         user_profile: &str,
         persistent_context: &str,
-        progress_tx: Option<mpsc::UnboundedSender<String>>,
+        progress_tx: Option<mpsc::UnboundedSender<AgentNotification>>,
     ) -> Result<AgentResult> {
         // Reset any per-run state held by tools (e.g. ask_claude session id).
         self.tools.notify_run_start();
@@ -104,7 +104,88 @@ impl Agent {
                 }
             }
 
-            let response = self.llm.chat_completion(&messages).await?;
+            // Stream the response, forwarding prose chunks to the progress
+            // channel as they arrive while suppressing text inside
+            // `<tool_call>...</tool_call>` blocks. We carry three pieces of
+            // state across callback invocations:
+            //   * `buffer` — accumulated text so far (matches the return value)
+            //   * `forwarded_up_to` — byte cursor into `buffer`, marking the
+            //     boundary between "already emitted as AssistantChunk" (or
+            //     deliberately suppressed as tool_call markup) and "still to
+            //     be processed".
+            //   * `inside_tool_call` — whether we're currently between an
+            //     opening `<tool_call>` and its closing `</tool_call>`.
+            //
+            // To avoid splitting the literal `<tool_call>` token across two
+            // notifications, when outside a tool_call we hold back any trailing
+            // prefix that could become `<tool_call>` once more bytes arrive.
+            const OPEN_TAG: &str = "<tool_call>";
+            const CLOSE_TAG: &str = "</tool_call>";
+            let mut buffer = String::new();
+            let mut forwarded_up_to: usize = 0;
+            let mut inside_tool_call = false;
+            let progress_tx_ref = progress_tx.as_ref();
+
+            let response = {
+                let mut on_chunk = |chunk: &str| {
+                    buffer.push_str(chunk);
+                    // Repeatedly transition between outside/inside states until
+                    // we can't make progress on the buffer suffix.
+                    loop {
+                        if !inside_tool_call {
+                            let tail = &buffer[forwarded_up_to..];
+                            if let Some(rel) = tail.find(OPEN_TAG) {
+                                // Forward any prose that precedes the opener.
+                                if rel > 0 {
+                                    let prose = &buffer[forwarded_up_to..forwarded_up_to + rel];
+                                    if let Some(tx) = progress_tx_ref {
+                                        let _ = tx.send(AgentNotification::AssistantChunk(
+                                            prose.to_string(),
+                                        ));
+                                    }
+                                }
+                                forwarded_up_to += rel + OPEN_TAG.len();
+                                inside_tool_call = true;
+                                continue;
+                            }
+                            // No complete `<tool_call>` opener in the tail.
+                            // Hold back any trailing partial that *could* still
+                            // grow into the opener once more bytes arrive.
+                            let safe_len = safe_prose_len(tail, OPEN_TAG);
+                            if safe_len > 0 {
+                                let prose =
+                                    &buffer[forwarded_up_to..forwarded_up_to + safe_len];
+                                if let Some(tx) = progress_tx_ref {
+                                    let _ = tx.send(AgentNotification::AssistantChunk(
+                                        prose.to_string(),
+                                    ));
+                                }
+                                forwarded_up_to += safe_len;
+                            }
+                            break;
+                        } else {
+                            let tail = &buffer[forwarded_up_to..];
+                            if let Some(rel) = tail.find(CLOSE_TAG) {
+                                forwarded_up_to += rel + CLOSE_TAG.len();
+                                inside_tool_call = false;
+                                continue;
+                            }
+                            // Closing tag not yet seen — suppress everything.
+                            break;
+                        }
+                    }
+                };
+                self.llm
+                    .chat_completion_stream(&messages, &mut on_chunk)
+                    .await?
+            };
+
+            // Sanity: the closure-maintained buffer must equal the backend's
+            // return value byte-for-byte. If they diverge, the suppression
+            // logic above is reasoning over a different string than parsing
+            // below would see.
+            debug_assert_eq!(buffer, response, "stream buffer drifted from response");
+
             tracing::debug!("LLM response: {}", response);
             let outcome = parse_tool_calls(&response);
 
@@ -129,7 +210,9 @@ impl Agent {
                 tracing::info!("Tool call: {}", call.name);
                 tracing::debug!("Tool params: {} {}", call.name, call.params);
                 if let Some(ref tx) = progress_tx {
-                    let _ = tx.send(tool_progress_label(&call.name).to_string());
+                    let _ = tx.send(AgentNotification::ToolProgress(
+                        tool_progress_label(&call.name).to_string(),
+                    ));
                 }
                 let result = match self
                     .tools
@@ -317,6 +400,25 @@ impl Agent {
 
         prompt
     }
+}
+
+/// Given an unforwarded tail of streamed text and the literal opening tag we
+/// care about (`<tool_call>`), return how many leading bytes are safe to
+/// forward immediately. The unsafe region is the longest non-empty suffix of
+/// `tail` that is also a proper prefix of `tag` — those bytes might still
+/// grow into a full `<tool_call>` opener once the next chunk arrives, so we
+/// hold them back to avoid leaking partial markup to clients.
+fn safe_prose_len(tail: &str, tag: &str) -> usize {
+    let bytes = tail.as_bytes();
+    let tag_bytes = tag.as_bytes();
+    let max = bytes.len().min(tag_bytes.len() - 1);
+    // Try the longest possible partial prefix first; first match wins.
+    for k in (1..=max).rev() {
+        if bytes[bytes.len() - k..] == tag_bytes[..k] {
+            return bytes.len() - k;
+        }
+    }
+    bytes.len()
 }
 
 /// Rough token estimate from char count. Real tokenization would round-trip

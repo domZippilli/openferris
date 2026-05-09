@@ -92,6 +92,14 @@ pub async fn run(socket_path: &str) -> Result<()> {
                 ResponseKind::Progress { text } => {
                     eprint!("\r\x1b[K{}", text);
                 }
+                ResponseKind::AssistantChunk { text } => {
+                    // Phase 1C/D: render incrementally. For now, append to
+                    // stdout so it's visible if Phase 1A/C ship before TUI
+                    // gets a proper renderer.
+                    print!("{}", text);
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                }
             }
         }
     }

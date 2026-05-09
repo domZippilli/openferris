@@ -1,5 +1,6 @@
 use openferris::agent::Agent;
 use openferris::llm::mock::MockLlm;
+use openferris::protocol::AgentNotification;
 use openferris::skills::Skill;
 use openferris::tools::datetime::DateTimeTool;
 use openferris::tools::ToolRegistry;
@@ -164,6 +165,70 @@ async fn test_max_iterations_exceeded() {
 // Parse failures now round-trip back to the model as a `parse_error` result,
 // so that scenario no longer reaches the final-answer path. `strip_tags` is
 // directly covered by a unit test in `agent.rs::tests::test_strip_tags`.
+
+/// Streaming forwards prose around a tool_call but suppresses the markup
+/// itself. The first scripted response interleaves prose with a `<tool_call>`
+/// block; clients should see the prose chunks but never the tool_call tags
+/// or the JSON inside them. Works whether MockLlm streams in many chunks or
+/// emits the response as a single chunk — the suppression logic is
+/// chunking-agnostic.
+#[tokio::test]
+async fn test_assistant_chunks_stream_around_tool_calls() {
+    let mock = MockLlm::new(vec![
+        // Turn 1: prose, tool_call, more prose. Trailing space-after-prose so
+        // MockLlm's word-splitter actually produces multiple chunks across
+        // the tool_call boundary.
+        r#"Here is the time: <tool_call>{"function": "datetime", "parameters": {}}</tool_call> done."#
+            .into(),
+        // Turn 2: final answer.
+        "It is currently afternoon.".into(),
+    ]);
+    let agent = Agent::new(Box::new(mock), test_registry(), String::new());
+    let skill = test_skill(&["datetime"]);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentNotification>();
+    let result = agent
+        .run(&skill, "What time is it?", &[], "", "", "", Some(tx))
+        .await
+        .unwrap();
+    assert_eq!(result.response, "It is currently afternoon.");
+
+    // Drain the channel. The sender is dropped when `agent.run` returns
+    // (we moved it in via `Some(tx)`), so `recv` will yield None promptly.
+    let mut chunks: Vec<String> = Vec::new();
+    while let Ok(n) = rx.try_recv() {
+        if let AgentNotification::AssistantChunk(text) = n {
+            chunks.push(text);
+        }
+    }
+    let joined = chunks.concat();
+
+    assert!(
+        joined.contains("Here is the time:"),
+        "expected leading prose in stream, got: {:?}",
+        joined
+    );
+    assert!(
+        joined.contains("done."),
+        "expected trailing prose in stream, got: {:?}",
+        joined
+    );
+    assert!(
+        !joined.contains("<tool_call>"),
+        "tool_call opener leaked into stream: {:?}",
+        joined
+    );
+    assert!(
+        !joined.contains("</tool_call>"),
+        "tool_call closer leaked into stream: {:?}",
+        joined
+    );
+    assert!(
+        !joined.contains("datetime"),
+        "tool_call body (function name) leaked into stream: {:?}",
+        joined
+    );
+}
 
 /// Compaction fires when the conversation exceeds the budget.
 /// Strategy: a tiny n_ctx + a huge assistant response forces the budget check
