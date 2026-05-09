@@ -5,7 +5,19 @@ use url::Url;
 
 use super::Tool;
 
-pub struct FetchUrlTool;
+pub struct FetchUrlTool {
+    /// Local/internal ports the agent is permitted to reach despite the
+    /// general SSRF block. Empty = original behavior (no internal access).
+    allowed_local_ports: Vec<u16>,
+}
+
+impl FetchUrlTool {
+    pub fn new(allowed_local_ports: Vec<u16>) -> Self {
+        Self {
+            allowed_local_ports,
+        }
+    }
+}
 
 /// Check if an IP address is private/loopback/link-local.
 fn is_internal_ip(ip: IpAddr) -> bool {
@@ -38,7 +50,8 @@ impl Tool for FetchUrlTool {
          Parameters: {\"url\": \"<url>\"}. \
          Returns the response body as text. Useful for reading web pages, \
          APIs, documentation, RSS feeds, etc. Only HTTP and HTTPS URLs are allowed. \
-         Cannot fetch localhost or internal network addresses."
+         Internal/localhost addresses are blocked except for ports explicitly \
+         allowed in config (e.g., the local wiki on 8088)."
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
@@ -56,19 +69,21 @@ impl Tool for FetchUrlTool {
         let host = parsed
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        let port_allowlisted = self.allowed_local_ports.contains(&port);
 
-        // Block known internal hostnames before DNS resolution
+        // Block known internal hostnames before DNS resolution.
+        // Skip the block when the destination port is allowlisted.
         let lower_host = host.to_lowercase();
-        if lower_host == "localhost"
+        let is_internal_hostname = lower_host == "localhost"
             || lower_host.ends_with(".local")
-            || lower_host.ends_with(".internal")
-        {
+            || lower_host.ends_with(".internal");
+        if is_internal_hostname && !port_allowlisted {
             bail!("Fetching internal/localhost URLs is not allowed");
         }
 
         // Resolve DNS and check all resulting IPs
         use tokio::net::lookup_host;
-        let port = parsed.port_or_known_default().unwrap_or(80);
         let addrs: Vec<_> = lookup_host(format!("{}:{}", host, port))
             .await
             .map_err(|e| anyhow::anyhow!("DNS resolution failed for {}: {}", host, e))?
@@ -79,7 +94,7 @@ impl Tool for FetchUrlTool {
         }
 
         for addr in &addrs {
-            if is_internal_ip(addr.ip()) {
+            if is_internal_ip(addr.ip()) && !port_allowlisted {
                 bail!(
                     "URL resolves to internal address {} — fetching internal URLs is not allowed",
                     addr.ip()

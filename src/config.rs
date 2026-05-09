@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub files: FilesConfig,
+    #[serde(default)]
+    pub fetch: FetchConfig,
     pub telegram: Option<TelegramConfig>,
     pub gmail: Option<GmailConfig>,
 }
@@ -99,6 +101,17 @@ pub struct FilesConfig {
     /// The workspace directory (~/.local/share/openferris/workspace/) is always allowed.
     #[serde(default)]
     pub allowed_directories: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct FetchConfig {
+    /// Local/internal-network ports that fetch_url is permitted to reach.
+    /// fetch_url normally blocks loopback/private addresses to avoid SSRF;
+    /// this allowlist punches a hole for known-safe local services like the
+    /// Quartz wiki on 8088. Only the *port* matters — any internal address
+    /// reaching one of these ports is allowed.
+    #[serde(default)]
+    pub allowed_local_ports: Vec<u16>,
 }
 
 /// Returns the list of directories the agent may read/write,
