@@ -59,8 +59,15 @@ struct ResponseMessage {
 
 impl LlamaCppBackend {
     pub fn new(endpoint: String, model: Option<String>, slot: i32) -> Result<Self> {
+        // Chat completions are non-streaming: llama-server is silent on the
+        // wire for the entire generation, so a read_timeout would fire
+        // mid-flight on legit long generations. Use a generous total timeout
+        // instead — long enough that healthy responses finish, short enough
+        // that a runaway/wedged generation eventually fails loudly. Revisit
+        // once streaming is wired up (read_timeout becomes the right tool).
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(600))
             .build()
             .context("Failed to build HTTP client")?;
 
