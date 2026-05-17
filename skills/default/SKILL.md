@@ -8,6 +8,7 @@ tools:
   - list_dir
   - fetch_url
   - web_search
+  - scrape_url
   - schedule
   - send_telegram
   - send_email

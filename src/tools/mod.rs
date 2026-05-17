@@ -5,6 +5,7 @@ pub mod gws;
 pub mod logs;
 pub mod run_skill;
 pub mod schedule;
+pub mod scrape;
 pub mod search;
 pub mod send_email;
 pub mod telegram;
@@ -98,6 +99,10 @@ impl ToolRegistry {
 
         if let Some(ref s) = config.search {
             self.register(Box::new(search::WebSearchTool::new(s.endpoint.clone())));
+        }
+
+        if let Some(ref f) = config.firecrawl {
+            self.register(Box::new(scrape::ScrapeUrlTool::new(f.endpoint.clone())));
         }
 
         if let Some(ref tg) = config.telegram {

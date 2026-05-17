@@ -13,6 +13,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub fetch: FetchConfig,
     pub search: Option<SearchConfig>,
+    pub firecrawl: Option<FirecrawlConfig>,
     pub telegram: Option<TelegramConfig>,
     pub gmail: Option<GmailConfig>,
 }
@@ -21,6 +22,13 @@ pub struct AppConfig {
 pub struct SearchConfig {
     /// SearXNG (or compatible) JSON search endpoint, e.g. "http://127.0.0.1:8888".
     /// The tool appends "/search?format=json&q=..." to this base.
+    pub endpoint: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FirecrawlConfig {
+    /// Firecrawl API base, e.g. "http://127.0.0.1:3002". The tool POSTs to
+    /// {endpoint}/v1/scrape.
     pub endpoint: String,
 }
 
