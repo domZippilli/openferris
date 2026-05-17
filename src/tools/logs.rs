@@ -20,10 +20,7 @@ impl Tool for JournalLogsTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let lines = params
-            .get("lines")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(50);
+        let lines = params.get("lines").and_then(|v| v.as_u64()).unwrap_or(50);
 
         let unit = params
             .get("unit")
@@ -35,7 +32,9 @@ impl Tool for JournalLogsTool {
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '*' || c == '.')
         {
-            anyhow::bail!("Invalid unit pattern: only alphanumerics, hyphens, underscores, dots, and * are allowed");
+            anyhow::bail!(
+                "Invalid unit pattern: only alphanumerics, hyphens, underscores, dots, and * are allowed"
+            );
         }
 
         let mut cmd = tokio::process::Command::new("journalctl");

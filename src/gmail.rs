@@ -1,6 +1,6 @@
-use anyhow::{bail, Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use anyhow::{Context, Result, bail};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -83,7 +83,14 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
     tracing::info!("Gmail listener starting...");
 
     // Get our email address and seed history ID if needed
-    let profile = run_gws(&["gmail", "users", "getProfile", "--params", &format!(r#"{{"userId":"me"}}"#)]).await?;
+    let profile = run_gws(&[
+        "gmail",
+        "users",
+        "getProfile",
+        "--params",
+        &format!(r#"{{"userId":"me"}}"#),
+    ])
+    .await?;
     let our_email = profile
         .get("emailAddress")
         .and_then(|v| v.as_str())
@@ -99,7 +106,10 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
             .and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| "")))
             .map(|_| {
                 // historyId can be a string or number in the response
-                profile["historyId"].to_string().trim_matches('"').to_string()
+                profile["historyId"]
+                    .to_string()
+                    .trim_matches('"')
+                    .to_string()
             })
             .ok_or_else(|| anyhow::anyhow!("No historyId in getProfile response"))?;
         tracing::info!("Seeded initial historyId: {}", hid);
@@ -112,11 +122,24 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
     let mut auth_failed = false;
 
     loop {
-        if let Err(e) = poll_once(&daemon_address, &gmail_config, &storage, &mut state, &our_email).await {
+        if let Err(e) = poll_once(
+            &daemon_address,
+            &gmail_config,
+            &storage,
+            &mut state,
+            &our_email,
+        )
+        .await
+        {
             let err_str = format!("{:#}", e);
-            if err_str.contains("401") || err_str.contains("authError") || err_str.contains("invalid_grant") {
+            if err_str.contains("401")
+                || err_str.contains("authError")
+                || err_str.contains("invalid_grant")
+            {
                 if !auth_failed {
-                    tracing::error!("Gmail authentication expired. Run `gws auth login` to re-authenticate.");
+                    tracing::error!(
+                        "Gmail authentication expired. Run `gws auth login` to re-authenticate."
+                    );
                     auth_failed = true;
                 }
                 tokio::time::sleep(auth_backoff).await;
@@ -160,7 +183,14 @@ async fn poll_once(
             if err_str.contains("404") {
                 // Expired historyId — re-seed
                 tracing::warn!("historyId expired, re-seeding from getProfile");
-                let profile = run_gws(&["gmail", "users", "getProfile", "--params", r#"{"userId":"me"}"#]).await?;
+                let profile = run_gws(&[
+                    "gmail",
+                    "users",
+                    "getProfile",
+                    "--params",
+                    r#"{"userId":"me"}"#,
+                ])
+                .await?;
                 let hid = profile["historyId"]
                     .to_string()
                     .trim_matches('"')
@@ -186,7 +216,11 @@ async fn poll_once(
         for entry in history {
             if let Some(added) = entry.get("messagesAdded").and_then(|v| v.as_array()) {
                 for msg in added {
-                    if let Some(id) = msg.get("message").and_then(|m| m.get("id")).and_then(|v| v.as_str()) {
+                    if let Some(id) = msg
+                        .get("message")
+                        .and_then(|m| m.get("id"))
+                        .and_then(|v| v.as_str())
+                    {
                         if !message_ids.contains(&id.to_string()) {
                             message_ids.push(id.to_string());
                         }
@@ -203,7 +237,9 @@ async fn poll_once(
     tracing::info!("Gmail: {} new message(s)", message_ids.len());
 
     for msg_id in &message_ids {
-        if let Err(e) = process_message(daemon_address, config, storage, state, our_email, msg_id).await {
+        if let Err(e) =
+            process_message(daemon_address, config, storage, state, our_email, msg_id).await
+        {
             tracing::error!("Error processing message {}: {:#}", msg_id, e);
         }
     }
@@ -253,7 +289,10 @@ async fn process_message(
     }
 
     // Authorization check: config allowlist or known contact in SQLite
-    let allowed = config.allowed_senders.iter().any(|s| s.to_lowercase() == sender_email)
+    let allowed = config
+        .allowed_senders
+        .iter()
+        .any(|s| s.to_lowercase() == sender_email)
         || storage.is_contact(&sender_email)?;
 
     if !allowed {
@@ -288,7 +327,11 @@ async fn process_message(
         while !body.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}\n\n[Email truncated — original was {} chars]", &body[..end], body.len())
+        format!(
+            "{}\n\n[Email truncated — original was {} chars]",
+            &body[..end],
+            body.len()
+        )
     } else {
         body
     };
@@ -298,7 +341,11 @@ async fn process_message(
         from, subject, body
     );
 
-    tracing::info!("Gmail: processing email from {} re: {}", sender_email, subject);
+    tracing::info!(
+        "Gmail: processing email from {} re: {}",
+        sender_email,
+        subject
+    );
     tracing::debug!("Gmail message body: {}", body);
 
     // Send to daemon
@@ -392,7 +439,11 @@ fn extract_plain_text_body(message: &serde_json::Value) -> Option<String> {
     // Try top-level body first (simple messages)
     if let Some(mime) = payload.get("mimeType").and_then(|v| v.as_str()) {
         if mime == "text/plain" {
-            if let Some(data) = payload.get("body").and_then(|b| b.get("data")).and_then(|d| d.as_str()) {
+            if let Some(data) = payload
+                .get("body")
+                .and_then(|b| b.get("data"))
+                .and_then(|d| d.as_str())
+            {
                 return decode_base64url(data);
             }
         }
@@ -406,7 +457,11 @@ fn extract_text_from_parts(part: &serde_json::Value) -> Option<String> {
         for p in parts {
             let mime = p.get("mimeType").and_then(|v| v.as_str()).unwrap_or("");
             if mime == "text/plain" {
-                if let Some(data) = p.get("body").and_then(|b| b.get("data")).and_then(|d| d.as_str()) {
+                if let Some(data) = p
+                    .get("body")
+                    .and_then(|b| b.get("data"))
+                    .and_then(|d| d.as_str())
+                {
                     return decode_base64url(data);
                 }
             }
@@ -464,6 +519,9 @@ mod tests {
     fn test_decode_base64url() {
         // "Hello, World!" in base64url
         let encoded = URL_SAFE_NO_PAD.encode(b"Hello, World!");
-        assert_eq!(decode_base64url(&encoded), Some("Hello, World!".to_string()));
+        assert_eq!(
+            decode_base64url(&encoded),
+            Some("Hello, World!".to_string())
+        );
     }
 }

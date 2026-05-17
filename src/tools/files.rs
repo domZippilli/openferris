@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
 
@@ -205,7 +205,11 @@ impl Tool for WriteFileTool {
         }
 
         std::fs::write(&validated, content)?;
-        Ok(format!("Written {} bytes to {}", content.len(), validated.display()))
+        Ok(format!(
+            "Written {} bytes to {}",
+            content.len(),
+            validated.display()
+        ))
     }
 }
 
@@ -349,7 +353,10 @@ mod tests {
 
         let sneaky = format!("{}/nonexistent/../../etc/passwd", dir.path().display());
         let result = validate_path(&sneaky, &allowed);
-        assert!(result.is_err(), "should reject traversal via nonexistent parent");
+        assert!(
+            result.is_err(),
+            "should reject traversal via nonexistent parent"
+        );
         assert!(
             result.unwrap_err().to_string().contains("outside allowed"),
             "error message should mention outside allowed directories"
@@ -362,10 +369,7 @@ mod tests {
         let allowed = vec![dir.path().to_path_buf()];
 
         // Multiple levels of nonexistent dirs with enough `..` to escape
-        let sneaky = format!(
-            "{}/a/b/c/../../../../etc/shadow",
-            dir.path().display()
-        );
+        let sneaky = format!("{}/a/b/c/../../../../etc/shadow", dir.path().display());
         let result = validate_path(&sneaky, &allowed);
         assert!(result.is_err(), "should reject deep traversal");
     }
@@ -376,9 +380,15 @@ mod tests {
         let allowed = vec![dir.path().to_path_buf()];
 
         // Mix `.` and `..` to try to confuse the normalizer
-        let sneaky = format!("{}/./nonexistent/./../../../etc/passwd", dir.path().display());
+        let sneaky = format!(
+            "{}/./nonexistent/./../../../etc/passwd",
+            dir.path().display()
+        );
         let result = validate_path(&sneaky, &allowed);
-        assert!(result.is_err(), "should reject traversal with mixed . and ..");
+        assert!(
+            result.is_err(),
+            "should reject traversal with mixed . and .."
+        );
     }
 
     #[test]
@@ -395,7 +405,10 @@ mod tests {
 
         let path = format!("{}/sub/../legit.txt", dir.path().display());
         let result = validate_path(&path, &allowed);
-        assert!(result.is_ok(), ".. that stays within allowed dir should be fine");
+        assert!(
+            result.is_ok(),
+            ".. that stays within allowed dir should be fine"
+        );
     }
 
     #[test]

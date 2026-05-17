@@ -5,14 +5,15 @@ pub mod gws;
 pub mod logs;
 pub mod run_skill;
 pub mod schedule;
+pub mod search;
 pub mod send_email;
 pub mod telegram;
 pub mod web;
 
+use crate::config::{self, AppConfig};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use crate::config::{self, AppConfig};
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -94,6 +95,10 @@ impl ToolRegistry {
         self.register(Box::new(gws::GwsTool));
         self.register(Box::new(logs::JournalLogsTool));
         self.register(Box::new(ask_claude::AskClaudeTool::new()));
+
+        if let Some(ref s) = config.search {
+            self.register(Box::new(search::WebSearchTool::new(s.endpoint.clone())));
+        }
 
         if let Some(ref tg) = config.telegram {
             self.register(Box::new(telegram::SendTelegramTool::new(

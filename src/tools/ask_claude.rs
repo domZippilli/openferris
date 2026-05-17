@@ -48,11 +48,7 @@ impl Tool for AskClaudeTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: prompt"))?;
 
-        let resume = self
-            .session
-            .lock()
-            .expect("session mutex poisoned")
-            .clone();
+        let resume = self.session.lock().expect("session mutex poisoned").clone();
 
         tracing::info!(
             "ask_claude: prompt ({} chars), resuming={}",
@@ -75,8 +71,9 @@ impl Tool for AskClaudeTool {
             anyhow::bail!("claude exited with {}: {}{}", output.status, stdout, stderr);
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
-            .with_context(|| format!("claude --output-format json returned non-JSON: {}", stdout))?;
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).with_context(|| {
+            format!("claude --output-format json returned non-JSON: {}", stdout)
+        })?;
 
         if parsed.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
             anyhow::bail!(

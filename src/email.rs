@@ -1,6 +1,6 @@
-use anyhow::{bail, Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use anyhow::{Context, Result, bail};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::storage::Storage;
 
@@ -39,7 +39,16 @@ pub async fn send_email(
     }
 
     // Compose RFC 2822
-    let raw = compose_raw(from, to, None, subject, body, in_reply_to, references, content_type);
+    let raw = compose_raw(
+        from,
+        to,
+        None,
+        subject,
+        body,
+        in_reply_to,
+        references,
+        content_type,
+    );
     let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
 
     let mut send_body = serde_json::json!({ "raw": encoded });

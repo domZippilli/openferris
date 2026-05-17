@@ -14,9 +14,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 pub struct LlamaCppBackend {
@@ -180,18 +178,16 @@ impl LlmBackend for LlamaCppBackend {
 
         if let Some(reason) = &choice.finish_reason {
             if reason == "length" {
-                tracing::warn!("LLM output truncated (finish_reason=length) — response may be incomplete");
+                tracing::warn!(
+                    "LLM output truncated (finish_reason=length) — response may be incomplete"
+                );
             }
         }
 
         if let Some(reasoning) = &choice.message.reasoning_content
             && !reasoning.is_empty()
         {
-            tracing::debug!(
-                "LLM reasoning ({} chars): {}",
-                reasoning.len(),
-                reasoning
-            );
+            tracing::debug!("LLM reasoning ({} chars): {}", reasoning.len(), reasoning);
         }
 
         Ok(choice.message.content)

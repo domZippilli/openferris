@@ -12,8 +12,16 @@ pub struct AppConfig {
     pub files: FilesConfig,
     #[serde(default)]
     pub fetch: FetchConfig,
+    pub search: Option<SearchConfig>,
     pub telegram: Option<TelegramConfig>,
     pub gmail: Option<GmailConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchConfig {
+    /// SearXNG (or compatible) JSON search endpoint, e.g. "http://127.0.0.1:8888".
+    /// The tool appends "/search?format=json&q=..." to this base.
+    pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

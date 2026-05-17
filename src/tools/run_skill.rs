@@ -72,7 +72,9 @@ impl Tool for RunSkillTool {
         // Load the skill and strip delivery tools — the parent handles delivery.
         let mut skill = skills::load_skill(skill_name, &self.skills_dir)?;
         const DELIVERY_TOOLS: &[&str] = &["send_telegram", "send_email"];
-        skill.tools.retain(|t| !DELIVERY_TOOLS.contains(&t.as_str()));
+        skill
+            .tools
+            .retain(|t| !DELIVERY_TOOLS.contains(&t.as_str()));
 
         // Create LLM backend on slot 1 (parent uses slot 0)
         let llm: Box<dyn crate::llm::LlmBackend> = Box::new(LlamaCppBackend::new(
@@ -111,7 +113,11 @@ impl Tool for RunSkillTool {
             )
             .await?;
 
-        tracing::info!("Subagent finished: skill={} ({} bytes)", skill_name, result.response.len());
+        tracing::info!(
+            "Subagent finished: skill={} ({} bytes)",
+            skill_name,
+            result.response.len()
+        );
 
         Ok(result.response)
     }

@@ -8,7 +8,9 @@ use tokio::sync::{mpsc, oneshot};
 use openferris::agent::{Agent, AgentResult};
 use openferris::config::{self, AppConfig};
 use openferris::llm::{ChatMessage, Role};
-use openferris::protocol::{AgentNotification, DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
+use openferris::protocol::{
+    AgentNotification, DaemonRequest, DaemonResponse, RequestKind, ResponseKind,
+};
 use openferris::skills;
 use openferris::storage::Storage;
 
@@ -29,7 +31,12 @@ struct LogData {
     result: AgentResult,
 }
 
-pub async fn run(config: AppConfig, agent: Agent, storage: Storage, memories: Memories) -> Result<()> {
+pub async fn run(
+    config: AppConfig,
+    agent: Agent,
+    storage: Storage,
+    memories: Memories,
+) -> Result<()> {
     let agent = Arc::new(agent);
     let socket_path = &config.daemon.socket;
     // Remove stale socket file from a previous run
@@ -316,56 +323,76 @@ async fn process_request(
         .unwrap_or_else(|| "unknown".to_string());
 
     match &queued.request.kind {
-        RequestKind::RunSkill { skill_name, context } => {
-            match skills::load_skill(skill_name, user_skills_dir) {
-                Ok(skill) => {
-                    let msg = match context {
-                        Some(ctx) => format!("Execute the {} skill now.\n\n{}", skill_name, ctx),
-                        None => format!("Execute the {} skill now.", skill_name),
-                    };
-                    match agent.run(&skill, &msg, &[], identity, user_profile, persistent_context, Some(progress_tx.clone())).await {
-                        Ok(result) => {
-                            let log = LogData {
-                                source,
-                                skill: Some(skill_name.clone()),
-                                user_message: msg,
-                                result: result.clone(),
-                            };
-                            let response = DaemonResponse {
-                                request_id,
-                                kind: ResponseKind::Done {
-                                    text: result.response,
-                                },
-                            };
-                            (response, Some(log))
-                        }
-                        Err(e) => (
-                            DaemonResponse {
-                                request_id,
-                                kind: ResponseKind::Error {
-                                    message: format!("{:#}", e),
-                                },
+        RequestKind::RunSkill {
+            skill_name,
+            context,
+        } => match skills::load_skill(skill_name, user_skills_dir) {
+            Ok(skill) => {
+                let msg = match context {
+                    Some(ctx) => format!("Execute the {} skill now.\n\n{}", skill_name, ctx),
+                    None => format!("Execute the {} skill now.", skill_name),
+                };
+                match agent
+                    .run(
+                        &skill,
+                        &msg,
+                        &[],
+                        identity,
+                        user_profile,
+                        persistent_context,
+                        Some(progress_tx.clone()),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        let log = LogData {
+                            source,
+                            skill: Some(skill_name.clone()),
+                            user_message: msg,
+                            result: result.clone(),
+                        };
+                        let response = DaemonResponse {
+                            request_id,
+                            kind: ResponseKind::Done {
+                                text: result.response,
                             },
-                            None,
-                        ),
+                        };
+                        (response, Some(log))
                     }
-                }
-                Err(e) => (
-                    DaemonResponse {
-                        request_id,
-                        kind: ResponseKind::Error {
-                            message: format!("{:#}", e),
+                    Err(e) => (
+                        DaemonResponse {
+                            request_id,
+                            kind: ResponseKind::Error {
+                                message: format!("{:#}", e),
+                            },
                         },
-                    },
-                    None,
-                ),
+                        None,
+                    ),
+                }
             }
-        }
+            Err(e) => (
+                DaemonResponse {
+                    request_id,
+                    kind: ResponseKind::Error {
+                        message: format!("{:#}", e),
+                    },
+                },
+                None,
+            ),
+        },
         RequestKind::FreeformMessage { text } => {
             match skills::load_skill("default", user_skills_dir) {
                 Ok(skill) => {
                     match agent
-                        .run(&skill, text, &queued.session_history, identity, user_profile, persistent_context, Some(progress_tx.clone()))
+                        .run(
+                            &skill,
+                            text,
+                            &queued.session_history,
+                            identity,
+                            user_profile,
+                            persistent_context,
+                            Some(progress_tx.clone()),
+                        )
                         .await
                     {
                         Ok(result) => {

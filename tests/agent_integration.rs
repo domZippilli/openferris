@@ -2,8 +2,8 @@ use openferris::agent::Agent;
 use openferris::llm::mock::MockLlm;
 use openferris::protocol::AgentNotification;
 use openferris::skills::Skill;
-use openferris::tools::datetime::DateTimeTool;
 use openferris::tools::ToolRegistry;
+use openferris::tools::datetime::DateTimeTool;
 
 fn test_skill(tool_names: &[&str]) -> Skill {
     Skill {
@@ -27,7 +27,10 @@ async fn test_direct_answer() {
     let agent = Agent::new(Box::new(mock), test_registry(), String::new());
     let skill = test_skill(&["datetime"]);
 
-    let result = agent.run(&skill, "Hi", &[], "", "", "", None).await.unwrap();
+    let result = agent
+        .run(&skill, "Hi", &[], "", "", "", None)
+        .await
+        .unwrap();
 
     assert_eq!(result.response, "Hello! How can I help you?");
     assert!(result.memories.is_empty());

@@ -138,21 +138,15 @@ async fn main() -> Result<()> {
             tui::run(&config.daemon.socket).await?;
         }
         Commands::Telegram => {
-            let tg_config = config
-                .telegram
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("No [telegram] section in config.toml. Add bot_token to enable."))?;
+            let tg_config = config.telegram.clone().ok_or_else(|| {
+                anyhow::anyhow!("No [telegram] section in config.toml. Add bot_token to enable.")
+            })?;
             telegram::run(config.daemon.socket.clone(), tg_config).await?;
         }
         Commands::Gmail => {
-            let gmail_config = config
-                .gmail
-                .clone()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "No [gmail] section in config.toml. Add allowed_senders to enable."
-                    )
-                })?;
+            let gmail_config = config.gmail.clone().ok_or_else(|| {
+                anyhow::anyhow!("No [gmail] section in config.toml. Add allowed_senders to enable.")
+            })?;
             gmail::run(config.daemon.socket.clone(), gmail_config).await?;
         }
         Commands::TestAgent { prompt, skill } => {
@@ -206,7 +200,15 @@ async fn main() -> Result<()> {
             });
 
             let result = agent
-                .run(&skill, &prompt, &[], &identity, &user_profile, "", Some(progress_tx))
+                .run(
+                    &skill,
+                    &prompt,
+                    &[],
+                    &identity,
+                    &user_profile,
+                    "",
+                    Some(progress_tx),
+                )
                 .await?;
             // Terminate the streamed line so the final response prints cleanly.
             eprintln!();
@@ -226,29 +228,31 @@ async fn main() -> Result<()> {
             let primary = config.daemon.socket.clone();
             let outcome = match client::send_skill(&primary, &skill_name).await {
                 Ok(r) => Ok(r),
-                Err(primary_err) => match client::read_socket_pointer() {
-                    Some(fallback) if fallback != primary => {
-                        match client::send_skill(&fallback, &skill_name).await {
-                            Ok(r) => {
-                                tracing::warn!(
-                                    "Connected via daemon-published socket {} (primary {} unreachable)",
+                Err(primary_err) => {
+                    match client::read_socket_pointer() {
+                        Some(fallback) if fallback != primary => {
+                            match client::send_skill(&fallback, &skill_name).await {
+                                Ok(r) => {
+                                    tracing::warn!(
+                                        "Connected via daemon-published socket {} (primary {} unreachable)",
+                                        fallback,
+                                        primary
+                                    );
+                                    Ok(r)
+                                }
+                                Err(fallback_err) => Err(anyhow::anyhow!(
+                                    "daemon unreachable:\n  primary {}: {:#}\n  fallback {}: {:#}",
+                                    primary,
+                                    primary_err,
                                     fallback,
-                                    primary
-                                );
-                                Ok(r)
+                                    fallback_err
+                                )),
                             }
-                            Err(fallback_err) => Err(anyhow::anyhow!(
-                                "daemon unreachable:\n  primary {}: {:#}\n  fallback {}: {:#}",
-                                primary,
-                                primary_err,
-                                fallback,
-                                fallback_err
-                            )),
                         }
+                        _ => Err(primary_err
+                            .context(format!("daemon unreachable at socket {}", primary))),
                     }
-                    _ => Err(primary_err
-                        .context(format!("daemon unreachable at socket {}", primary))),
-                },
+                }
             };
 
             match outcome {
@@ -399,7 +403,10 @@ fn schedule_command(cmd: ScheduleCommand) -> Result<()> {
     Ok(())
 }
 
-fn create_llm_backend(config: &config::AppConfig, slot: i32) -> anyhow::Result<Box<dyn llm::LlmBackend>> {
+fn create_llm_backend(
+    config: &config::AppConfig,
+    slot: i32,
+) -> anyhow::Result<Box<dyn llm::LlmBackend>> {
     match config.llm.backend.as_str() {
         "llamacpp" => Ok(Box::new(llm::llamacpp::LlamaCppBackend::new(
             config.llm.endpoint.clone(),

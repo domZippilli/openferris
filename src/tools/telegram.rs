@@ -89,7 +89,10 @@ impl Tool for SendTelegramTool {
 /// HTML entities (<, >, &) are escaped first so arbitrary text is safe.
 fn markdown_to_html(text: &str) -> String {
     // Step 1: escape HTML entities
-    let text = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let text = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
 
     let mut result = String::with_capacity(text.len() * 2);
     let chars: Vec<char> = text.chars().collect();
@@ -323,10 +326,7 @@ mod tests {
 
     #[test]
     fn test_plain_text_passthrough() {
-        assert_eq!(
-            markdown_to_html("Hello, world!"),
-            "Hello, world!"
-        );
+        assert_eq!(markdown_to_html("Hello, world!"), "Hello, world!");
     }
 
     #[test]
@@ -413,16 +413,14 @@ mod tests {
     #[test]
     fn test_unpaired_markers_passthrough() {
         // A lone * or _ without a closing pair should pass through as-is
-        assert_eq!(
-            markdown_to_html("5 * 3 = 15"),
-            "5 * 3 = 15"
-        );
+        assert_eq!(markdown_to_html("5 * 3 = 15"), "5 * 3 = 15");
     }
 
     #[test]
     fn test_complex_message() {
         let input = "*Summary*\n\n3 meetings (9am, 11am, 2pm).\nReview PR #42.\nScore: 8/10.";
-        let expected = "<b>Summary</b>\n\n3 meetings (9am, 11am, 2pm).\nReview PR #42.\nScore: 8/10.";
+        let expected =
+            "<b>Summary</b>\n\n3 meetings (9am, 11am, 2pm).\nReview PR #42.\nScore: 8/10.";
         assert_eq!(markdown_to_html(input), expected);
     }
 

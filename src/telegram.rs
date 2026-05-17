@@ -43,8 +43,7 @@ pub async fn run(daemon_address: String, tg_config: TelegramConfig) -> Result<()
             let user_id = message.from.as_ref().map(|u| u.id).unwrap_or(0);
 
             // Check user allowlist
-            if !tg_config.allowed_users.is_empty() && !tg_config.allowed_users.contains(&user_id)
-            {
+            if !tg_config.allowed_users.is_empty() && !tg_config.allowed_users.contains(&user_id) {
                 tracing::warn!("Telegram message from unauthorized user {}", user_id);
                 continue;
             }
@@ -62,8 +61,7 @@ pub async fn run(daemon_address: String, tg_config: TelegramConfig) -> Result<()
                 }
             });
 
-            let response =
-                handle_message(&text, &daemon_address, &http, &base_url, chat_id).await;
+            let response = handle_message(&text, &daemon_address, &http, &base_url, chat_id).await;
             typing_handle.abort();
 
             // If streaming already rendered the final reply via live edits to
@@ -232,9 +230,7 @@ async fn send_request_with_progress(
             }
             ResponseKind::Progress { text: label } => match status_msg_id {
                 None => {
-                    if let Ok(msg_id) =
-                        send_message_get_id(http, base_url, chat_id, &label).await
-                    {
+                    if let Ok(msg_id) = send_message_get_id(http, base_url, chat_id, &label).await {
                         status_msg_id = Some(msg_id);
                     }
                 }
@@ -271,8 +267,7 @@ async fn send_request_with_progress(
                         };
                         if due {
                             let body = truncate_for_telegram(&chunk_buffer);
-                            let _ =
-                                edit_message(http, base_url, chat_id, msg_id, &body).await;
+                            let _ = edit_message(http, base_url, chat_id, msg_id, &body).await;
                             last_edit = Some(std::time::Instant::now());
                         }
                     }
@@ -323,11 +318,7 @@ struct TgUser {
 
 // --- Telegram Bot API calls ---
 
-async fn get_updates(
-    http: &reqwest::Client,
-    base_url: &str,
-    offset: i64,
-) -> Result<Vec<TgUpdate>> {
+async fn get_updates(http: &reqwest::Client, base_url: &str, offset: i64) -> Result<Vec<TgUpdate>> {
     let resp: TgResponse<Vec<TgUpdate>> = http
         .get(format!("{}/getUpdates", base_url))
         .query(&[
@@ -341,8 +332,12 @@ async fn get_updates(
         .await
         .context("Failed to parse Telegram response")?;
 
-    resp.result
-        .ok_or_else(|| anyhow::anyhow!("Telegram API error: {}", resp.description.unwrap_or_default()))
+    resp.result.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Telegram API error: {}",
+            resp.description.unwrap_or_default()
+        )
+    })
 }
 
 async fn send_chat_action(

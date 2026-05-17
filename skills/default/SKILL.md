@@ -7,6 +7,7 @@ tools:
   - write_file
   - list_dir
   - fetch_url
+  - web_search
   - schedule
   - send_telegram
   - send_email

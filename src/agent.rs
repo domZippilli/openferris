@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::llm::{ChatMessage, LlmBackend, Role};
-use crate::protocol::{tool_progress_label, AgentNotification};
+use crate::protocol::{AgentNotification, tool_progress_label};
 use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 
@@ -54,7 +54,8 @@ impl Agent {
         // Reset any per-run state held by tools (e.g. ask_claude session id).
         self.tools.notify_run_start();
 
-        let system_prompt = self.build_system_prompt(skill, identity, user_profile, persistent_context);
+        let system_prompt =
+            self.build_system_prompt(skill, identity, user_profile, persistent_context);
 
         let mut messages = vec![ChatMessage {
             role: Role::System,
@@ -74,7 +75,10 @@ impl Agent {
         let n_ctx = match self.llm.context_window_tokens().await {
             Ok(n) => n,
             Err(e) => {
-                tracing::warn!("Could not query context window: {}; falling back to 100_000", e);
+                tracing::warn!(
+                    "Could not query context window: {}; falling back to 100_000",
+                    e
+                );
                 100_000
             }
         };
@@ -92,7 +96,10 @@ impl Agent {
                         let after = estimate_tokens(&new_messages);
                         tracing::info!(
                             "Compacted context: {} -> {} tokens (compaction {}/{})",
-                            before, after, compactions_done + 1, MAX_COMPACTIONS
+                            before,
+                            after,
+                            compactions_done + 1,
+                            MAX_COMPACTIONS
                         );
                         messages = new_messages;
                         compactions_done += 1;
@@ -153,12 +160,10 @@ impl Agent {
                             // grow into the opener once more bytes arrive.
                             let safe_len = safe_prose_len(tail, OPEN_TAG);
                             if safe_len > 0 {
-                                let prose =
-                                    &buffer[forwarded_up_to..forwarded_up_to + safe_len];
+                                let prose = &buffer[forwarded_up_to..forwarded_up_to + safe_len];
                                 if let Some(tx) = progress_tx_ref {
-                                    let _ = tx.send(AgentNotification::AssistantChunk(
-                                        prose.to_string(),
-                                    ));
+                                    let _ = tx
+                                        .send(AgentNotification::AssistantChunk(prose.to_string()));
                                 }
                                 forwarded_up_to += safe_len;
                             }
@@ -315,10 +320,7 @@ impl Agent {
             },
         ];
 
-        let summary = self
-            .llm
-            .chat_completion(&summarization_messages)
-            .await?;
+        let summary = self.llm.chat_completion(&summarization_messages).await?;
 
         let summary_msg = ChatMessage {
             role: Role::User,
@@ -328,15 +330,20 @@ impl Agent {
             ),
         };
 
-        let mut out =
-            Vec::with_capacity(preserved_head_end + 1 + (messages.len() - keep_start));
+        let mut out = Vec::with_capacity(preserved_head_end + 1 + (messages.len() - keep_start));
         out.extend_from_slice(&messages[..preserved_head_end]);
         out.push(summary_msg);
         out.extend_from_slice(&messages[keep_start..]);
         Ok(out)
     }
 
-    fn build_system_prompt(&self, skill: &Skill, identity: &str, user_profile: &str, persistent_context: &str) -> String {
+    fn build_system_prompt(
+        &self,
+        skill: &Skill,
+        identity: &str,
+        user_profile: &str,
+        persistent_context: &str,
+    ) -> String {
         let tool_descriptions = self.tools.get_descriptions(&skill.tools);
 
         let mut prompt = String::new();
@@ -386,7 +393,9 @@ impl Agent {
             prompt.push_str("You may call tools multiple times. When you have all the information you need, respond with your final answer without any <tool_call> blocks.\n\n");
             prompt.push_str("## Act, do not announce\n\n");
             prompt.push_str("If you intend to use a tool, emit the <tool_call> block in the SAME response. Do not say \"I will now do X\" or \"let me check Y\" without including the corresponding <tool_call> in that turn — if you only describe the action, the loop ends and the action never happens. Either:\n");
-            prompt.push_str("- Take the action: emit the <tool_call> block (with or without brief prose), or\n");
+            prompt.push_str(
+                "- Take the action: emit the <tool_call> block (with or without brief prose), or\n",
+            );
             prompt.push_str("- Decline / finish: state your final answer with no <tool_call>.\n\n");
             prompt.push_str("Never end a turn with an unfulfilled commitment like \"next, I'll...\" — finish the work in this turn or in a subsequent turn that actually contains the call.\n\n");
         }
@@ -551,7 +560,11 @@ fn parse_tool_calls(text: &str) -> ParseOutcome {
                         .unwrap_or(serde_json::Value::Object(Default::default()));
 
                     if !name.is_empty() {
-                        outcome.calls.push(ToolCall { name, params, repair_note: note });
+                        outcome.calls.push(ToolCall {
+                            name,
+                            params,
+                            repair_note: note,
+                        });
                     } else {
                         outcome.errors.push(ParseError {
                             raw: inner.to_string(),
@@ -769,7 +782,11 @@ mod tests {
         assert_eq!(outcome.calls.len(), 1);
         assert_eq!(outcome.calls[0].name, "send_telegram");
         assert!(
-            outcome.calls[0].repair_note.as_deref().unwrap_or("").contains("closing"),
+            outcome.calls[0]
+                .repair_note
+                .as_deref()
+                .unwrap_or("")
+                .contains("closing"),
             "expected a closing-brace repair note"
         );
     }

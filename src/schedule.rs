@@ -37,7 +37,10 @@ fn validate_skill_name(name: &str) -> Result<()> {
 /// The expression must not contain shell metacharacters.
 fn validate_cron_expr(expr: &str) -> Result<()> {
     // Reject dangerous characters that could allow command injection.
-    const FORBIDDEN: &[char] = &['\n', '\r', ';', '`', '|', '$', '&', '(', ')', '{', '}', '<', '>', '\'', '"', '\\', '!', '#'];
+    const FORBIDDEN: &[char] = &[
+        '\n', '\r', ';', '`', '|', '$', '&', '(', ')', '{', '}', '<', '>', '\'', '"', '\\', '!',
+        '#',
+    ];
     if let Some(bad) = expr.chars().find(|c| FORBIDDEN.contains(c)) {
         anyhow::bail!(
             "Invalid cron expression: contains forbidden character '{}'",
@@ -55,7 +58,10 @@ fn validate_cron_expr(expr: &str) -> Result<()> {
     }
 
     for (i, field) in fields.iter().enumerate() {
-        if !field.chars().all(|c| c.is_ascii_digit() || matches!(c, '*' | '/' | ',' | '-')) {
+        if !field
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '*' | '/' | ',' | '-'))
+        {
             anyhow::bail!(
                 "Invalid cron expression: field {} ('{}') contains invalid characters \
                  (only digits, *, /, comma, - are allowed)",

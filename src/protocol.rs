@@ -16,8 +16,12 @@ pub enum RequestKind {
         #[serde(default)]
         context: Option<String>,
     },
-    FreeformMessage { text: String },
-    StoreMemory { content: String },
+    FreeformMessage {
+        text: String,
+    },
+    StoreMemory {
+        content: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,13 +32,21 @@ pub struct DaemonResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ResponseKind {
-    Done { text: String },
-    Error { message: String },
+    Done {
+        text: String,
+    },
+    Error {
+        message: String,
+    },
     /// Intermediate progress update sent while the agent is working.
-    Progress { text: String },
+    Progress {
+        text: String,
+    },
     /// A streamed chunk of assistant prose. Multiple of these arrive between
     /// the request and the final `Done`. Clients should append/coalesce.
-    AssistantChunk { text: String },
+    AssistantChunk {
+        text: String,
+    },
 }
 
 /// In-process notification carried on the agent→daemon channel. The daemon

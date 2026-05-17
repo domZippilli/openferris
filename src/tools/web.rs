@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use std::net::IpAddr;
 use url::Url;
@@ -111,7 +111,11 @@ impl Tool for FetchUrlTool {
         let status = response.status();
 
         if !status.is_success() {
-            bail!("HTTP {}: {}", status.as_u16(), status.canonical_reason().unwrap_or(""));
+            bail!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("")
+            );
         }
 
         let body = response.text().await?;
@@ -123,7 +127,11 @@ impl Tool for FetchUrlTool {
             while !body.is_char_boundary(end) {
                 end -= 1;
             }
-            Ok(format!("{}\n\n[Truncated — response was {} bytes]", &body[..end], body.len()))
+            Ok(format!(
+                "{}\n\n[Truncated — response was {} bytes]",
+                &body[..end],
+                body.len()
+            ))
         } else {
             Ok(body)
         }

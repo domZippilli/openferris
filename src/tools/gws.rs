@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 
 use super::Tool;
@@ -106,7 +106,9 @@ impl Tool for GwsTool {
             .await
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    anyhow::anyhow!("gws is not installed. Install with: npm install -g @googleworkspace/cli")
+                    anyhow::anyhow!(
+                        "gws is not installed. Install with: npm install -g @googleworkspace/cli"
+                    )
                 } else {
                     anyhow::anyhow!("Failed to run gws: {}", e)
                 }
@@ -189,19 +191,35 @@ mod tests {
 
     #[test]
     fn test_shell_split_single_quotes() {
-        let args = shell_split(r#"gmail users messages list --params '{"userId": "me", "maxResults": 5}'"#).unwrap();
-        assert_eq!(args, vec![
-            "gmail", "users", "messages", "list",
-            "--params", r#"{"userId": "me", "maxResults": 5}"#,
-        ]);
+        let args = shell_split(
+            r#"gmail users messages list --params '{"userId": "me", "maxResults": 5}'"#,
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "gmail",
+                "users",
+                "messages",
+                "list",
+                "--params",
+                r#"{"userId": "me", "maxResults": 5}"#,
+            ]
+        );
     }
 
     #[test]
     fn test_shell_split_double_quotes() {
         let args = shell_split(r#"drive files list --params "some value with spaces""#).unwrap();
-        assert_eq!(args, vec![
-            "drive", "files", "list",
-            "--params", "some value with spaces",
-        ]);
+        assert_eq!(
+            args,
+            vec![
+                "drive",
+                "files",
+                "list",
+                "--params",
+                "some value with spaces",
+            ]
+        );
     }
 }
