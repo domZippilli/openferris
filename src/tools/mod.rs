@@ -8,6 +8,7 @@ pub mod schedule;
 pub mod scrape;
 pub mod search;
 pub mod send_email;
+pub mod stealth;
 pub mod telegram;
 pub mod web;
 
@@ -103,6 +104,10 @@ impl ToolRegistry {
 
         if let Some(ref f) = config.firecrawl {
             self.register(Box::new(scrape::ScrapeUrlTool::new(f.endpoint.clone())));
+        }
+
+        if let Some(ref c) = config.camoufox {
+            self.register(Box::new(stealth::StealthFetchTool::new(c.endpoint.clone())));
         }
 
         if let Some(ref tg) = config.telegram {

@@ -9,6 +9,7 @@ tools:
   - fetch_url
   - web_search
   - scrape_url
+  - stealth_fetch
   - schedule
   - send_telegram
   - send_email

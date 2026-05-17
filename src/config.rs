@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub fetch: FetchConfig,
     pub search: Option<SearchConfig>,
     pub firecrawl: Option<FirecrawlConfig>,
+    pub camoufox: Option<CamoufoxConfig>,
     pub telegram: Option<TelegramConfig>,
     pub gmail: Option<GmailConfig>,
 }
@@ -29,6 +30,13 @@ pub struct SearchConfig {
 pub struct FirecrawlConfig {
     /// Firecrawl API base, e.g. "http://127.0.0.1:3002". The tool POSTs to
     /// {endpoint}/v1/scrape.
+    pub endpoint: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CamoufoxConfig {
+    /// Camoufox stealth-fetch API base, e.g. "http://127.0.0.1:8765".
+    /// The tool POSTs to {endpoint}/fetch.
     pub endpoint: String,
 }
 
