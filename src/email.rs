@@ -4,16 +4,23 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::storage::Storage;
 
-/// Send an email via gws, checking the recipient against the allowed senders
-/// config list and the known_contacts table in SQLite.
+/// Send an email via gws, checking the `to` recipient against the allowed
+/// senders config list and the known_contacts table in SQLite.
 ///
 /// If `allowed_senders` is empty, all recipients are allowed.
-/// After sending, the recipient is recorded as a known contact.
+/// After sending, the `to` recipient is recorded as a known contact.
+///
+/// `cc` recipients are **caller-vetted**: they are sent verbatim and are
+/// neither authorized against the allowlist/contacts nor recorded as contacts.
+/// The Gmail reply-all path passes only addresses it has already approved
+/// (introduced to the thread by the owner or a whitelisted sender), which may
+/// legitimately include third parties who are not themselves whitelisted.
 pub async fn send_email(
     storage: &Storage,
     allowed_senders: &[String],
     from: Option<&str>,
     to: &str,
+    cc: Option<&str>,
     subject: &str,
     body: &str,
     in_reply_to: Option<&str>,
@@ -42,7 +49,7 @@ pub async fn send_email(
     let raw = compose_raw(
         from,
         to,
-        None,
+        cc,
         subject,
         body,
         in_reply_to,
