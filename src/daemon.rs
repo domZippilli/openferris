@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -18,9 +19,23 @@ use crate::memories::Memories;
 
 struct QueuedRequest {
     request: DaemonRequest,
-    session_history: Vec<ChatMessage>,
     response_tx: oneshot::Sender<DaemonResponse>,
     progress_tx: mpsc::UnboundedSender<AgentNotification>,
+}
+
+/// Fraction of the model's context window the stored per-session history is
+/// allowed to occupy. The rest is left for the system prompt, persistent
+/// context, the current turn, and tool round-trips (the agent still compacts
+/// in-run as a backstop). Half keeps a fresh turn comfortably within budget.
+const HISTORY_TOKEN_FRACTION: f32 = 0.5;
+
+/// Drop whole oldest turns (user+assistant pairs) from the front until the
+/// estimated token count fits `budget`. Always keeps at least the most recent
+/// pair so a follow-up still has its immediate antecedent.
+fn trim_history(history: &mut Vec<ChatMessage>, budget: usize) {
+    while history.len() > 2 && openferris::agent::estimate_tokens(history) > budget {
+        history.drain(0..2);
+    }
 }
 
 /// Data needed to log an interaction after the agent finishes.
@@ -70,6 +85,11 @@ pub async fn run(
     let worker_agent = agent.clone();
     let user_skills_dir = config::config_dir().join("skills");
     tokio::spawn(async move {
+        // Per-conversation history, keyed by request.session_id. Lives for the
+        // life of the daemon process (in-memory; cleared on restart) so a chat
+        // stays coherent across the separate connections clients open per
+        // message. The single worker owns it, so no locking is needed.
+        let mut sessions: HashMap<String, Vec<ChatMessage>> = HashMap::new();
         while let Some(queued) = rx.recv().await {
             let request_id = queued.request.id.clone();
 
@@ -119,11 +139,24 @@ pub async fn run(
             let identity = config::load_identity();
             let user_profile = config::load_user();
 
+            // Conversation continuity: only freeform messages carrying a
+            // session_id thread together. Pull the prior turns for this session
+            // (a clone, so the worker can update the canonical copy afterward).
+            let session_key = match &queued.request.kind {
+                RequestKind::FreeformMessage { .. } => queued.request.session_id.clone(),
+                _ => None,
+            };
+            let history: Vec<ChatMessage> = session_key
+                .as_ref()
+                .and_then(|k| sessions.get(k).cloned())
+                .unwrap_or_default();
+
             // Async: run agent
             let progress_tx = queued.progress_tx.clone();
             let (response, log_data) = process_request(
                 &worker_agent,
                 &queued,
+                &history,
                 &user_skills_dir,
                 &identity,
                 &user_profile,
@@ -150,6 +183,32 @@ pub async fn run(
                 }
             }
 
+            // Record this turn so the session stays coherent on the next
+            // message. Only on success: a failed turn shouldn't poison future
+            // context, and skipping it keeps user/assistant pairs aligned.
+            if let (Some(key), RequestKind::FreeformMessage { text }) =
+                (&session_key, &queued.request.kind)
+                && let ResponseKind::Done { text: ref reply } = response.kind
+            {
+                let budget = match worker_agent.context_window_tokens().await {
+                    Ok(n) => ((n as f32) * HISTORY_TOKEN_FRACTION) as usize,
+                    Err(e) => {
+                        tracing::warn!("Could not size history budget: {}; using 50_000", e);
+                        50_000
+                    }
+                };
+                let entry = sessions.entry(key.clone()).or_default();
+                entry.push(ChatMessage {
+                    role: Role::User,
+                    content: text.clone(),
+                });
+                entry.push(ChatMessage {
+                    role: Role::Assistant,
+                    content: reply.clone(),
+                });
+                trim_history(entry, budget);
+            }
+
             let _ = queued.response_tx.send(response);
         }
     });
@@ -170,7 +229,6 @@ pub async fn run(
             let (reader, mut writer) = stream.into_split();
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
-            let mut session_history: Vec<ChatMessage> = vec![];
 
             loop {
                 line.clear();
@@ -201,23 +259,11 @@ pub async fn run(
 
                         tracing::debug!("Daemon request: {:?}", request.kind);
 
-                        let is_freeform =
-                            matches!(request.kind, RequestKind::FreeformMessage { .. });
-                        let user_text = match &request.kind {
-                            RequestKind::FreeformMessage { text } => Some(text.clone()),
-                            _ => None,
-                        };
-
                         let request_id = request.id.clone();
                         let (resp_tx, resp_rx) = oneshot::channel();
                         let (prog_tx, mut prog_rx) = mpsc::unbounded_channel::<AgentNotification>();
                         let queued = QueuedRequest {
                             request,
-                            session_history: if is_freeform {
-                                session_history.clone()
-                            } else {
-                                vec![]
-                            },
                             response_tx: resp_tx,
                             progress_tx: prog_tx,
                         };
@@ -252,20 +298,10 @@ pub async fn run(
                                     }
                                     match result {
                                         Ok(response) => {
-                                            if is_freeform {
-                                                if let Some(ref text) = user_text {
-                                                    session_history.push(ChatMessage {
-                                                        role: Role::User,
-                                                        content: text.clone(),
-                                                    });
-                                                }
-                                                if let ResponseKind::Done { ref text } = response.kind {
-                                                    session_history.push(ChatMessage {
-                                                        role: Role::Assistant,
-                                                        content: text.clone(),
-                                                    });
-                                                }
-                                            }
+                                            // Session history now lives in the
+                                            // worker (keyed by session_id), so
+                                            // the connection just relays the
+                                            // response to the client.
                                             let _ = write_response(&mut writer, &response).await;
                                         }
                                         Err(_) => {
@@ -309,6 +345,7 @@ async fn write_response(
 async fn process_request(
     agent: &Agent,
     queued: &QueuedRequest,
+    history: &[ChatMessage],
     user_skills_dir: &std::path::Path,
     identity: &str,
     user_profile: &str,
@@ -387,7 +424,7 @@ async fn process_request(
                         .run(
                             &skill,
                             text,
-                            &queued.session_history,
+                            history,
                             identity,
                             user_profile,
                             persistent_context,

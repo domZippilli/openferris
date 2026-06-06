@@ -20,6 +20,10 @@ pub async fn run(socket_path: &str) -> Result<()> {
     println!("Type your message and press Enter. Ctrl+C to quit.");
     println!("  /remember <fact> — save a memory directly\n");
 
+    // One conversation per TUI process: all turns share this key so the daemon
+    // threads them together (history now lives in the daemon, not the socket).
+    let session_id = format!("tui:{}", uuid::Uuid::new_v4());
+
     loop {
         eprint!("> ");
 
@@ -50,6 +54,7 @@ pub async fn run(socket_path: &str) -> Result<()> {
                     content: fact.to_string(),
                 },
                 source: Some("tui".to_string()),
+                session_id: None,
             }
         } else {
             DaemonRequest {
@@ -58,6 +63,7 @@ pub async fn run(socket_path: &str) -> Result<()> {
                     text: input.to_string(),
                 },
                 source: Some("tui".to_string()),
+                session_id: Some(session_id.clone()),
             }
         };
 

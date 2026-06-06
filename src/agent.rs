@@ -38,6 +38,13 @@ impl Agent {
         Self { llm, tools, soul }
     }
 
+    /// Per-slot context window size in tokens, as reported by the backend.
+    /// Exposed so callers (e.g. the daemon's session store) can size their own
+    /// history budgets against the same window the agent runs in.
+    pub async fn context_window_tokens(&self) -> Result<usize> {
+        self.llm.context_window_tokens().await
+    }
+
     /// Run the agent loop for a skill with a user message.
     /// `history` contains prior conversation messages (for TUI sessions).
     /// `persistent_context` is loaded from storage (memories + recent interactions).
@@ -433,7 +440,7 @@ fn safe_prose_len(tail: &str, tag: &str) -> usize {
 /// Rough token estimate from char count. Real tokenization would round-trip
 /// through the model's tokenizer; this is a guardrail, not a billing oracle,
 /// so chars/4 (the standard English heuristic) is plenty.
-fn estimate_tokens(messages: &[ChatMessage]) -> usize {
+pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
 }
 

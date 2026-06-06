@@ -356,6 +356,7 @@ async fn process_message(
             context: Some(context),
         },
         source: Some("gmail".to_string()),
+        session_id: None,
     };
 
     let response = match client::send_request(daemon_address, &request).await {

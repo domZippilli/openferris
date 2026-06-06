@@ -27,6 +27,7 @@ pub async fn send_skill(socket_path: &str, skill_name: &str) -> Result<String> {
             context: None,
         },
         source: Some("cli".to_string()),
+        session_id: None,
     };
     send_request(socket_path, &request).await
 }

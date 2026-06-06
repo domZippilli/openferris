@@ -7,6 +7,12 @@ pub struct DaemonRequest {
     /// Where this request originated from (e.g., "tui", "cli", "telegram").
     #[serde(default)]
     pub source: Option<String>,
+    /// Stable conversation key. Freeform messages sharing a `session_id` are
+    /// threaded together so the agent sees prior turns even across separate
+    /// daemon connections (e.g. Telegram opens a new connection per message).
+    /// `None` means a one-shot request with no conversational continuity.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

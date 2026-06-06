@@ -102,6 +102,7 @@ async fn handle_message(
                 content: fact.to_string(),
             },
             source: Some("telegram".to_string()),
+            session_id: None,
         }
     } else {
         DaemonRequest {
@@ -110,6 +111,9 @@ async fn handle_message(
                 text: text.to_string(),
             },
             source: Some("telegram".to_string()),
+            // Thread by chat: every message in this chat shares history,
+            // even though each opens a fresh daemon connection.
+            session_id: Some(format!("telegram:{}", chat_id)),
         }
     };
 
