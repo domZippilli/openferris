@@ -34,7 +34,8 @@ struct ChatRequest {
     /// Pin to a specific llama.cpp slot for KV cache reuse across requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     id_slot: Option<i32>,
-    /// Override the server's default n_predict. -1 = unlimited.
+    /// Override the server's default token cap. `None` omits the field, which
+    /// both llama.cpp and vLLM treat as "generate to EOS" (vLLM rejects -1).
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<i32>,
     /// Server-Sent Events streaming of generated tokens. Only set when the
@@ -127,6 +128,18 @@ struct PropsGeneration {
     n_ctx: usize,
 }
 
+/// vLLM's OpenAI `/v1/models` reports the context window as `max_model_len`
+/// per model; used as a fallback when `/props` (llama.cpp-only) is absent.
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    max_model_len: Option<usize>,
+}
+
 #[async_trait]
 impl LlmBackend for LlamaCppBackend {
     async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
@@ -142,7 +155,7 @@ impl LlmBackend for LlamaCppBackend {
             model: self.model.clone().unwrap_or_else(|| "default".to_string()),
             messages: api_messages,
             id_slot: Some(self.slot),
-            max_tokens: Some(-1),
+            max_tokens: None,
             stream: false,
         };
 
@@ -210,7 +223,7 @@ impl LlmBackend for LlamaCppBackend {
             model: self.model.clone().unwrap_or_else(|| "default".to_string()),
             messages: api_messages,
             id_slot: Some(self.slot),
-            max_tokens: Some(-1),
+            max_tokens: None,
             stream: true,
         };
 
@@ -318,22 +331,52 @@ impl LlmBackend for LlamaCppBackend {
         if let Some(&n) = self.n_ctx.get() {
             return Ok(n);
         }
-        let url = format!("{}/props", self.endpoint.trim_end_matches('/'));
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("Failed to fetch /props from llama-server")?;
-        let status = resp.status();
-        if !status.is_success() {
-            anyhow::bail!("llama.cpp /props returned HTTP {}", status);
+        let base = self.endpoint.trim_end_matches('/');
+
+        // llama.cpp exposes the per-slot context via /props. vLLM has no /props
+        // but reports max_model_len on the OpenAI /v1/models route, so fall back
+        // to that — keeping one client compatible with either backend.
+        let props = async {
+            let resp = self.client.get(format!("{base}/props")).send().await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("/props returned HTTP {}", resp.status());
+            }
+            let p: PropsResponse = resp.json().await?;
+            anyhow::Ok(p.default_generation_settings.n_ctx)
         }
-        let props: PropsResponse = resp
-            .json()
-            .await
-            .context("Failed to parse /props response")?;
-        let n = props.default_generation_settings.n_ctx;
+        .await;
+
+        let n = match props {
+            Ok(n) => n,
+            Err(props_err) => {
+                let resp = self
+                    .client
+                    .get(format!("{base}/v1/models"))
+                    .send()
+                    .await
+                    .context("Neither /props nor /v1/models reachable")?;
+                if !resp.status().is_success() {
+                    anyhow::bail!(
+                        "context window unavailable: /props failed ({props_err:#}) \
+                         and /v1/models returned HTTP {}",
+                        resp.status()
+                    );
+                }
+                let models: ModelsResponse = resp
+                    .json()
+                    .await
+                    .context("Failed to parse /v1/models response")?;
+                models
+                    .data
+                    .iter()
+                    .find_map(|m| m.max_model_len)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "/v1/models reported no max_model_len (/props: {props_err:#})"
+                        )
+                    })?
+            }
+        };
         let _ = self.n_ctx.set(n);
         Ok(n)
     }
