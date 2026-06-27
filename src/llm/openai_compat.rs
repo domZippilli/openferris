@@ -17,7 +17,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-pub struct LlamaCppBackend {
+pub struct OpenAiCompatBackend {
     client: Client,
     endpoint: String,
     model: Option<String>,
@@ -97,7 +97,7 @@ struct ResponseMessage {
     reasoning_content: Option<String>,
 }
 
-impl LlamaCppBackend {
+impl OpenAiCompatBackend {
     pub fn new(
         endpoint: String,
         model: Option<String>,
@@ -153,7 +153,7 @@ struct ModelEntry {
 }
 
 #[async_trait]
-impl LlmBackend for LlamaCppBackend {
+impl LlmBackend for OpenAiCompatBackend {
     async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
         let api_messages: Vec<ApiMessage> = messages
             .iter()
@@ -184,24 +184,28 @@ impl LlmBackend for LlamaCppBackend {
             .json(&request)
             .send()
             .await
-            .context("Failed to connect to llama.cpp server")?;
+            .context("Failed to connect to OpenAI-compatible chat server")?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("llama.cpp returned HTTP {}: {}", status, body);
+            anyhow::bail!(
+                "OpenAI-compatible chat server returned HTTP {}: {}",
+                status,
+                body
+            );
         }
 
         let chat_response: ChatResponse = response
             .json()
             .await
-            .context("Failed to parse llama.cpp response")?;
+            .context("Failed to parse OpenAI-compatible chat response")?;
 
         let choice = chat_response
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("No choices in llama.cpp response"))?;
+            .ok_or_else(|| anyhow::anyhow!("No choices in OpenAI-compatible chat response"))?;
 
         if let Some(reason) = &choice.finish_reason {
             if reason == "length" {
@@ -255,12 +259,16 @@ impl LlmBackend for LlamaCppBackend {
             .json(&request)
             .send()
             .await
-            .context("Failed to connect to llama.cpp server")?;
+            .context("Failed to connect to OpenAI-compatible chat server")?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("llama.cpp returned HTTP {}: {}", status, body);
+            anyhow::bail!(
+                "OpenAI-compatible chat server returned HTTP {}: {}",
+                status,
+                body
+            );
         }
 
         let mut stream = response.bytes_stream();
@@ -275,14 +283,15 @@ impl LlmBackend for LlamaCppBackend {
         let mut done = false;
 
         while let Some(chunk) = stream.next().await {
-            let bytes = chunk.context("Error reading streaming response from llama.cpp")?;
+            let bytes = chunk
+                .context("Error reading streaming response from OpenAI-compatible chat server")?;
             buffer.extend_from_slice(&bytes);
 
             while let Some(idx) = find_subslice(&buffer, b"\n\n") {
                 let raw: Vec<u8> = buffer.drain(..idx + 2).collect();
                 let message_bytes = &raw[..raw.len() - 2];
                 let message = std::str::from_utf8(message_bytes)
-                    .context("llama.cpp SSE message was not valid UTF-8")?;
+                    .context("OpenAI-compatible chat SSE message was not valid UTF-8")?;
 
                 // An SSE message is one or more lines; each `data:` line
                 // contributes one logical payload. llama.cpp packs the JSON

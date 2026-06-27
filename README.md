@@ -7,7 +7,7 @@ OpenFerris uses a central daemon that owns the LLM session. Everything else — 
 ## Prerequisites
 
 - **Rust 1.93+** (2024 edition)
-- **A running llama.cpp server** (or any OpenAI-compatible API endpoint)
+- **An OpenAI-compatible chat API endpoint** (for example vLLM or llama.cpp)
 
 ## Install
 
@@ -43,7 +43,7 @@ cat > ~/.config/openferris/config.toml << 'EOF'
 timezone = "America/New_York"
 
 [llm]
-backend = "llamacpp"
+backend = "openai_compat"
 endpoint = "http://localhost:8080"
 temperature = 0.6
 top_k = 20
@@ -211,8 +211,8 @@ timezone = "America/New_York"    # IANA timezone for the datetime tool
 zip_code = "10001"               # For future weather tool
 
 [llm]
-backend = "llamacpp"             # LLM backend (currently: llamacpp)
-endpoint = "http://localhost:8080"  # llama.cpp server URL
+backend = "openai_compat"        # LLM backend
+endpoint = "http://localhost:8080"  # OpenAI-compatible server URL
 model = "my-model"               # Optional model name
 temperature = 0.6                # Sampling temperature
 top_k = 20                       # Sampling top-k
@@ -230,7 +230,7 @@ OpenFerris is in early development. The core architecture is functional:
 
 - [x] Central daemon with TCP server and request queue
 - [x] Agent loop with tool call parsing and execution
-- [x] llama.cpp backend (OpenAI-compatible API)
+- [x] OpenAI-compatible chat backend
 - [x] Skill system with AgentSkills format
 - [x] Tool system with per-skill focus lists
 - [x] CLI client and interactive TUI

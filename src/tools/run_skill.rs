@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use super::Tool;
 use crate::agent::Agent;
 use crate::config::LlmConfig;
-use crate::llm::llamacpp::LlamaCppBackend;
+use crate::llm::openai_compat::OpenAiCompatBackend;
 use crate::skills;
 use crate::tools::ToolRegistry;
 
@@ -77,7 +77,7 @@ impl Tool for RunSkillTool {
             .retain(|t| !DELIVERY_TOOLS.contains(&t.as_str()));
 
         // Create LLM backend on slot 1 (parent uses slot 0)
-        let llm: Box<dyn crate::llm::LlmBackend> = Box::new(LlamaCppBackend::new(
+        let llm: Box<dyn crate::llm::LlmBackend> = Box::new(OpenAiCompatBackend::new(
             self.llm_config.endpoint.clone(),
             self.llm_config.model.clone(),
             self.llm_config.temperature,

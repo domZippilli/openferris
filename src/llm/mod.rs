@@ -1,5 +1,5 @@
-pub mod llamacpp;
 pub mod mock;
+pub mod openai_compat;
 
 use async_trait::async_trait;
 
@@ -49,8 +49,8 @@ pub trait LlmBackend: Send + Sync {
         Ok(full)
     }
 
-    /// Per-slot context window size in tokens. Backends that talk to a server
-    /// (llama.cpp) discover this at runtime; mocks and offline backends return
-    /// a sensible constant. Used by the agent to decide when to compact.
+    /// Per-slot context window size in tokens. Server-backed implementations
+    /// discover this at runtime; mocks and offline backends return a sensible
+    /// constant. Used by the agent to decide when to compact.
     async fn context_window_tokens(&self) -> anyhow::Result<usize>;
 }

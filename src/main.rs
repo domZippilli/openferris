@@ -408,16 +408,21 @@ fn create_llm_backend(
     slot: i32,
 ) -> anyhow::Result<Box<dyn llm::LlmBackend>> {
     match config.llm.backend.as_str() {
-        "llamacpp" => Ok(Box::new(llm::llamacpp::LlamaCppBackend::new(
-            config.llm.endpoint.clone(),
-            config.llm.model.clone(),
-            config.llm.temperature,
-            config.llm.top_k,
-            slot,
-        )?)),
+        "openai_compat" | "openai-compatible" | "llamacpp" => {
+            Ok(Box::new(llm::openai_compat::OpenAiCompatBackend::new(
+                config.llm.endpoint.clone(),
+                config.llm.model.clone(),
+                config.llm.temperature,
+                config.llm.top_k,
+                slot,
+            )?))
+        }
         other => {
-            tracing::warn!("Unknown LLM backend '{}', defaulting to llamacpp", other);
-            Ok(Box::new(llm::llamacpp::LlamaCppBackend::new(
+            tracing::warn!(
+                "Unknown LLM backend '{}', defaulting to openai_compat",
+                other
+            );
+            Ok(Box::new(llm::openai_compat::OpenAiCompatBackend::new(
                 config.llm.endpoint.clone(),
                 config.llm.model.clone(),
                 config.llm.temperature,

@@ -181,7 +181,7 @@ Configuration specifies which backend to use, endpoint URL, model name, etc.
 ```toml
 # ~/.config/openferris/config.toml
 [llm]
-backend = "llamacpp"          # or "claude-cli", "anthropic-api"
+backend = "openai_compat"     # or "claude-cli", "anthropic-api"
 endpoint = "http://localhost:8080"
 model = "..."
 ```
@@ -217,7 +217,7 @@ timezone = "America/New_York"
 zip_code = "10001"
 
 [llm]
-backend = "llamacpp"
+backend = "openai_compat"
 endpoint = "http://localhost:8080"
 
 [daemon]
@@ -252,7 +252,7 @@ openferris/
 │   │   └── ...
 │   ├── llm/                # LLM backend abstraction
 │   │   ├── mod.rs
-│   │   ├── llamacpp.rs
+│   │   ├── openai_compat.rs
 │   │   └── claude_cli.rs
 │   ├── daemon/             # Central daemon (LLM session, agent loop, queue)
 │   ├── tui/                # Terminal UI client

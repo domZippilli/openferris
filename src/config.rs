@@ -64,14 +64,14 @@ pub struct LlmConfig {
     /// local vLLM MTP benchmark defaults unless explicitly overridden.
     #[serde(default = "default_top_k")]
     pub top_k: u32,
-    /// Number of parallel slots on the llama.cpp server.
+    /// Number of parallel slots on OpenAI-compatible servers that support slot pinning.
     /// Set >1 to enable subagent support (parent uses slot 0, subagents use 1+).
     #[serde(default = "default_parallel_slots")]
     pub parallel_slots: u32,
 }
 
 fn default_backend() -> String {
-    "llamacpp".to_string()
+    "openai_compat".to_string()
 }
 
 fn default_parallel_slots() -> u32 {
