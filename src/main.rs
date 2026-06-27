@@ -411,6 +411,8 @@ fn create_llm_backend(
         "llamacpp" => Ok(Box::new(llm::llamacpp::LlamaCppBackend::new(
             config.llm.endpoint.clone(),
             config.llm.model.clone(),
+            config.llm.temperature,
+            config.llm.top_k,
             slot,
         )?)),
         other => {
@@ -418,6 +420,8 @@ fn create_llm_backend(
             Ok(Box::new(llm::llamacpp::LlamaCppBackend::new(
                 config.llm.endpoint.clone(),
                 config.llm.model.clone(),
+                config.llm.temperature,
+                config.llm.top_k,
                 slot,
             )?))
         }

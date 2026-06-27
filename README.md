@@ -45,6 +45,8 @@ timezone = "America/New_York"
 [llm]
 backend = "llamacpp"
 endpoint = "http://localhost:8080"
+temperature = 0.6
+top_k = 20
 
 [daemon]
 listen = "127.0.0.1:7700"
@@ -212,10 +214,15 @@ zip_code = "10001"               # For future weather tool
 backend = "llamacpp"             # LLM backend (currently: llamacpp)
 endpoint = "http://localhost:8080"  # llama.cpp server URL
 model = "my-model"               # Optional model name
+temperature = 0.6                # Sampling temperature
+top_k = 20                       # Sampling top-k
 
 [daemon]
 listen = "127.0.0.1:7700"       # TCP address for the daemon
 ```
+
+`OPENFERRIS_LLM_TEMPERATURE` and `OPENFERRIS_LLM_TOP_K` override the configured
+sampling values for quick experiments.
 
 ## Project Status
 

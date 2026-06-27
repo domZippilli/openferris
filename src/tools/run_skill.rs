@@ -80,6 +80,8 @@ impl Tool for RunSkillTool {
         let llm: Box<dyn crate::llm::LlmBackend> = Box::new(LlamaCppBackend::new(
             self.llm_config.endpoint.clone(),
             self.llm_config.model.clone(),
+            self.llm_config.temperature,
+            self.llm_config.top_k,
             1,
         )?);
 

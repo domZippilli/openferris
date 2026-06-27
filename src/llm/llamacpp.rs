@@ -21,6 +21,8 @@ pub struct LlamaCppBackend {
     client: Client,
     endpoint: String,
     model: Option<String>,
+    temperature: f32,
+    top_k: u32,
     slot: i32,
     /// Per-slot context window discovered from the server's `/props` endpoint.
     /// Cached after first successful fetch; never refreshed within a process.
@@ -38,6 +40,8 @@ struct ChatRequest {
     /// both llama.cpp and vLLM treat as "generate to EOS" (vLLM rejects -1).
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<i32>,
+    temperature: f32,
+    top_k: u32,
     /// Server-Sent Events streaming of generated tokens. Only set when the
     /// caller wants per-chunk delivery; non-streaming callers omit it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -94,7 +98,13 @@ struct ResponseMessage {
 }
 
 impl LlamaCppBackend {
-    pub fn new(endpoint: String, model: Option<String>, slot: i32) -> Result<Self> {
+    pub fn new(
+        endpoint: String,
+        model: Option<String>,
+        temperature: f32,
+        top_k: u32,
+        slot: i32,
+    ) -> Result<Self> {
         // Chat completions are non-streaming: llama-server is silent on the
         // wire for the entire generation, so a read_timeout would fire
         // mid-flight on legit long generations. Use a generous total timeout
@@ -111,6 +121,8 @@ impl LlamaCppBackend {
             client,
             endpoint,
             model,
+            temperature,
+            top_k,
             slot,
             n_ctx: OnceCell::new(),
         })
@@ -156,6 +168,8 @@ impl LlmBackend for LlamaCppBackend {
             messages: api_messages,
             id_slot: Some(self.slot),
             max_tokens: None,
+            temperature: self.temperature,
+            top_k: self.top_k,
             stream: false,
         };
 
@@ -224,6 +238,8 @@ impl LlmBackend for LlamaCppBackend {
             messages: api_messages,
             id_slot: Some(self.slot),
             max_tokens: None,
+            temperature: self.temperature,
+            top_k: self.top_k,
             stream: true,
         };
 

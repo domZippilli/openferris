@@ -57,6 +57,13 @@ pub struct LlmConfig {
     pub backend: String,
     pub endpoint: String,
     pub model: Option<String>,
+    /// Sampling temperature sent with chat completion requests.
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    /// Restrict sampling to the top K tokens. Set by config/env to match the
+    /// local vLLM MTP benchmark defaults unless explicitly overridden.
+    #[serde(default = "default_top_k")]
+    pub top_k: u32,
     /// Number of parallel slots on the llama.cpp server.
     /// Set >1 to enable subagent support (parent uses slot 0, subagents use 1+).
     #[serde(default = "default_parallel_slots")]
@@ -69,6 +76,14 @@ fn default_backend() -> String {
 
 fn default_parallel_slots() -> u32 {
     1
+}
+
+fn default_temperature() -> f32 {
+    0.6
+}
+
+fn default_top_k() -> u32 {
+    20
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -201,8 +216,18 @@ pub fn load_config() -> Result<AppConfig> {
             path.display()
         )
     })?;
-    let config: AppConfig = toml::from_str(&content)
+    let mut config: AppConfig = toml::from_str(&content)
         .with_context(|| format!("Failed to parse config: {}", path.display()))?;
+    if let Ok(value) = std::env::var("OPENFERRIS_LLM_TEMPERATURE") {
+        config.llm.temperature = value.parse().with_context(|| {
+            format!("Failed to parse OPENFERRIS_LLM_TEMPERATURE={value:?} as f32")
+        })?;
+    }
+    if let Ok(value) = std::env::var("OPENFERRIS_LLM_TOP_K") {
+        config.llm.top_k = value
+            .parse()
+            .with_context(|| format!("Failed to parse OPENFERRIS_LLM_TOP_K={value:?} as u32"))?;
+    }
     Ok(config)
 }
 
