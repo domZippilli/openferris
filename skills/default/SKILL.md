@@ -17,6 +17,7 @@ tools:
   - journal_logs
   - run_skill
   - ask_claude
+  - ask_codex
 ---
 
 You received a message from your human. Help them with whatever they need.

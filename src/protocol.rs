@@ -77,6 +77,7 @@ pub fn tool_progress_label(tool_name: &str) -> &'static str {
         "gws" => "Querying Google...",
         "journal_logs" => "Reading system logs...",
         "ask_claude" => "Thinking harder...",
+        "ask_codex" => "Asking Codex...",
         "send_telegram" => "Sending a Telegram message...",
         "send_email" => "Sending an email...",
         "run_skill" => "Running a sub-task...",

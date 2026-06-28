@@ -1,4 +1,5 @@
 pub mod ask_claude;
+pub mod ask_codex;
 pub mod datetime;
 pub mod files;
 pub mod gws;
@@ -23,7 +24,7 @@ pub trait Tool: Send + Sync {
     fn description_for_llm(&self) -> &str;
     async fn execute(&self, params: serde_json::Value) -> Result<String>;
     /// Called by the agent at the start of every Agent::run(). Tools that
-    /// hold per-run state (e.g. a Claude session id for multi-turn ask_claude)
+    /// hold per-run state (e.g. a session id for multi-turn ask_claude/ask_codex)
     /// reset it here. Default: no-op.
     fn on_run_start(&self) {}
 }
@@ -97,6 +98,7 @@ impl ToolRegistry {
         self.register(Box::new(gws::GwsTool));
         self.register(Box::new(logs::JournalLogsTool));
         self.register(Box::new(ask_claude::AskClaudeTool::new()));
+        self.register(Box::new(ask_codex::AskCodexTool::new()));
 
         if let Some(ref s) = config.search {
             self.register(Box::new(search::WebSearchTool::new(s.endpoint.clone())));

@@ -72,6 +72,7 @@ pub async fn run(socket_path: &str) -> Result<()> {
         tcp_writer.write_all(data.as_bytes()).await?;
         tcp_writer.flush().await?;
 
+        let mut rendered_assistant_chunks = false;
         loop {
             let mut response_line = String::new();
             tcp_reader.read_line(&mut response_line).await?;
@@ -87,7 +88,11 @@ pub async fn run(socket_path: &str) -> Result<()> {
             match response.kind {
                 ResponseKind::Done { text } => {
                     eprint!("\r\x1b[K");
-                    println!("\n{}\n", text);
+                    if rendered_assistant_chunks {
+                        println!("\n");
+                    } else {
+                        println!("\n{}\n", text);
+                    }
                     break;
                 }
                 ResponseKind::Error { message } => {
@@ -102,6 +107,7 @@ pub async fn run(socket_path: &str) -> Result<()> {
                     // Phase 1C/D: render incrementally. For now, append to
                     // stdout so it's visible if Phase 1A/C ship before TUI
                     // gets a proper renderer.
+                    rendered_assistant_chunks = true;
                     print!("{}", text);
                     use std::io::Write;
                     let _ = std::io::stdout().flush();

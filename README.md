@@ -193,6 +193,8 @@ Tools are capabilities the agent can invoke. Each tool is a Rust module with a n
 | `read_file` | Read file contents (sandboxed) |
 | `write_file` | Write/create files (sandboxed) |
 | `list_dir` | List directory contents (sandboxed) |
+| `ask_claude` | Ask Claude Code for help in a per-run conversation |
+| `ask_codex` | Ask Codex for help in a per-run conversation |
 
 File tools are restricted to `~/.local/share/openferris/workspace/` by default. Add extra directories in config:
 

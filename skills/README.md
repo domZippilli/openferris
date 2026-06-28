@@ -44,6 +44,8 @@ skill is invoked. Be specific about what you want the agent to do.
 - `send_telegram` — Send a message via Telegram. Params: `{"message": "...", "chat_id": <optional>}`
 - `send_email` — Send an email via Gmail. Params: `{"to": "...", "subject": "...", "body": "..."}`. Recipient must be in allowed contacts or a known contact.
 - `gws` — Run a Google Workspace CLI command. Params: `{"command": "..."}`. Destructive operations (delete, trash, send, empty, remove) are blocked. Use send_email to send emails.
+- `ask_claude` — Ask Claude Code for help. Params: `{"prompt": "..."}`
+- `ask_codex` — Ask Codex for help. Params: `{"prompt": "..."}`
 
 File tools are sandboxed to allowed directories only.
 
