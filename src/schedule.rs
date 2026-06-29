@@ -1,7 +1,10 @@
 use anyhow::Result;
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 /// Marker comment so we can identify our entries in the crontab.
 const CRON_MARKER: &str = "# openferris:";
+const CRONTAB_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Validate that a skill name is safe to embed in a crontab entry.
 ///
@@ -88,6 +91,22 @@ fn read_crontab() -> Result<String> {
     }
 }
 
+async fn read_crontab_async() -> Result<String> {
+    let mut cmd = tokio::process::Command::new("crontab");
+    cmd.arg("-l").kill_on_drop(true);
+    let output = tokio::time::timeout(CRONTAB_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| anyhow::anyhow!("crontab -l timed out after {:?}", CRONTAB_TIMEOUT))?
+        .map_err(|e| anyhow::anyhow!("Failed to run crontab: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        // Empty crontab returns error on some systems
+        Ok(String::new())
+    }
+}
+
 fn write_crontab(content: &str) -> Result<()> {
     use std::io::Write;
     let mut child = std::process::Command::new("crontab")
@@ -103,6 +122,34 @@ fn write_crontab(content: &str) -> Result<()> {
         .write_all(content.as_bytes())?;
 
     let status = child.wait()?;
+    if !status.success() {
+        anyhow::bail!("crontab returned error");
+    }
+    Ok(())
+}
+
+async fn write_crontab_async(content: &str) -> Result<()> {
+    let mut child = tokio::process::Command::new("crontab")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to run crontab: {}", e))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to open stdin pipe for crontab"))?;
+    stdin.write_all(content.as_bytes()).await?;
+    drop(stdin);
+
+    let status = match tokio::time::timeout(CRONTAB_TIMEOUT, child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = child.kill().await;
+            anyhow::bail!("crontab update timed out after {:?}", CRONTAB_TIMEOUT);
+        }
+    };
+
     if !status.success() {
         anyhow::bail!("crontab returned error");
     }
@@ -145,8 +192,57 @@ pub fn add(skill_name: &str, cron_expr: &str) -> Result<String> {
     Ok(format!("Scheduled '{}': {}", skill_name, cron_expr))
 }
 
+pub async fn add_async(skill_name: &str, cron_expr: &str) -> Result<String> {
+    validate_skill_name(skill_name)?;
+    validate_cron_expr(cron_expr)?;
+
+    let mut crontab = read_crontab_async().await?;
+    let marker = format!("{} {}", CRON_MARKER, skill_name);
+
+    if crontab.lines().any(|l| l.contains(&marker)) {
+        anyhow::bail!(
+            "Skill '{}' is already scheduled. Remove it first.",
+            skill_name
+        );
+    }
+
+    let entry = format!(
+        "{} {} run {} {}\n",
+        cron_expr,
+        binary_path(),
+        skill_name,
+        marker
+    );
+
+    crontab.push_str(&entry);
+    write_crontab_async(&crontab).await?;
+
+    Ok(format!("Scheduled '{}': {}", skill_name, cron_expr))
+}
+
 pub fn remove(skill_name: &str) -> Result<String> {
     let crontab = read_crontab()?;
+    match crontab_without_skill(skill_name, &crontab) {
+        Some(new_crontab) => {
+            write_crontab(&new_crontab)?;
+            Ok(format!("Removed schedule for '{}'.", skill_name))
+        }
+        None => Ok(format!("No schedule found for '{}'.", skill_name)),
+    }
+}
+
+pub async fn remove_async(skill_name: &str) -> Result<String> {
+    let crontab = read_crontab_async().await?;
+    match crontab_without_skill(skill_name, &crontab) {
+        Some(new_crontab) => {
+            write_crontab_async(&new_crontab).await?;
+            Ok(format!("Removed schedule for '{}'.", skill_name))
+        }
+        None => Ok(format!("No schedule found for '{}'.", skill_name)),
+    }
+}
+
+fn crontab_without_skill(skill_name: &str, crontab: &str) -> Option<String> {
     let marker = format!("{} {}", CRON_MARKER, skill_name);
 
     let new_crontab: String = crontab
@@ -158,22 +254,21 @@ pub fn remove(skill_name: &str) -> Result<String> {
     let removed = crontab.lines().count() != new_crontab.lines().count();
 
     if !removed {
-        return Ok(format!("No schedule found for '{}'.", skill_name));
+        return None;
     }
 
-    // Ensure trailing newline
-    let new_crontab = if new_crontab.is_empty() {
+    Some(if new_crontab.is_empty() {
         String::new()
     } else {
         format!("{}\n", new_crontab.trim_end())
-    };
-
-    write_crontab(&new_crontab)?;
-    Ok(format!("Removed schedule for '{}'.", skill_name))
+    })
 }
 
 pub fn list() -> Result<String> {
-    let crontab = read_crontab()?;
+    format_crontab_entries(&read_crontab()?)
+}
+
+fn format_crontab_entries(crontab: &str) -> Result<String> {
     let entries: Vec<&str> = crontab
         .lines()
         .filter(|l| l.contains(CRON_MARKER))
@@ -196,6 +291,10 @@ pub fn list() -> Result<String> {
         }
     }
     Ok(output)
+}
+
+pub async fn list_async() -> Result<String> {
+    format_crontab_entries(&read_crontab_async().await?)
 }
 
 #[cfg(test)]
@@ -271,6 +370,44 @@ mod tests {
         assert!(validate_cron_expr("0 0 1,15 * *").is_ok());
         assert!(validate_cron_expr("30 6 * * 1-5").is_ok());
         assert!(validate_cron_expr("0 */2 * * *").is_ok());
+    }
+
+    #[test]
+    fn remove_crontab_entry_preserves_other_entries() {
+        let crontab = "\
+0 7 * * * /bin/echo keep
+0 8 * * * /usr/bin/openferris run daily # openferris: daily
+30 9 * * 1 /bin/echo also-keep
+";
+
+        let updated = crontab_without_skill("daily", crontab).unwrap();
+
+        assert_eq!(
+            updated,
+            "0 7 * * * /bin/echo keep\n30 9 * * 1 /bin/echo also-keep\n"
+        );
+    }
+
+    #[test]
+    fn remove_crontab_entry_returns_none_when_absent() {
+        assert!(crontab_without_skill("missing", "0 7 * * * /bin/echo keep\n").is_none());
+    }
+
+    #[test]
+    fn format_crontab_entries_lists_only_openferris_entries() {
+        let crontab = "\
+0 7 * * * /bin/echo keep
+15 8 * * * /usr/bin/openferris run daily # openferris: daily
+30 9 * * 1 /usr/bin/openferris run weekly # openferris: weekly
+";
+
+        let formatted = format_crontab_entries(crontab).unwrap();
+
+        assert!(formatted.contains("daily"));
+        assert!(formatted.contains("15 8 * * *"));
+        assert!(formatted.contains("weekly"));
+        assert!(formatted.contains("30 9 * * 1"));
+        assert!(!formatted.contains("/bin/echo keep"));
     }
 
     #[test]

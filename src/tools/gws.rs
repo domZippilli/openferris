@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
+use std::time::Duration;
 
 use super::Tool;
 
@@ -8,6 +9,7 @@ const DENIED_METHODS: &[&str] = &["delete", "trash", "send", "empty", "remove"];
 
 /// Denied top-level subcommands.
 const DENIED_SUBCOMMANDS: &[&str] = &["auth"];
+const GWS_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct GwsTool;
 
@@ -100,10 +102,12 @@ impl Tool for GwsTool {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         is_allowed(&arg_refs)?;
 
-        let output = tokio::process::Command::new("gws")
-            .args(&args)
-            .output()
+        let mut cmd = tokio::process::Command::new("gws");
+        cmd.args(&args).kill_on_drop(true);
+
+        let output = tokio::time::timeout(GWS_TIMEOUT, cmd.output())
             .await
+            .map_err(|_| anyhow::anyhow!("gws timed out after {:?}", GWS_TIMEOUT))?
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     anyhow::anyhow!(

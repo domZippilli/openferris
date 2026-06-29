@@ -35,16 +35,16 @@ impl Tool for ScheduleTool {
                     .get("cron_expr")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing required parameter: cron_expr"))?;
-                crate::schedule::add(skill_name, cron_expr)
+                crate::schedule::add_async(skill_name, cron_expr).await
             }
             "remove" => {
                 let skill_name = params
                     .get("skill_name")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing required parameter: skill_name"))?;
-                crate::schedule::remove(skill_name)
+                crate::schedule::remove_async(skill_name).await
             }
-            "list" => crate::schedule::list(),
+            "list" => crate::schedule::list_async().await,
             other => anyhow::bail!("Unknown action '{}'. Use: add, remove, or list", other),
         }
     }

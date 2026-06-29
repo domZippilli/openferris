@@ -1,10 +1,13 @@
 use std::process::Stdio;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use super::Tool;
+
+const CODEX_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub struct AskCodexTool {
     /// Thread id from the previous ask_codex call in the current agent run.
@@ -109,8 +112,12 @@ impl Tool for AskCodexTool {
         } else {
             cmd.args(["exec", "--skip-git-repo-check", "--json", prompt]);
         }
+        cmd.kill_on_drop(true);
 
-        let output = cmd.output().await.context("Failed to run codex CLI")?;
+        let output = tokio::time::timeout(CODEX_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| anyhow::anyhow!("codex timed out after {:?}", CODEX_TIMEOUT))?
+            .context("Failed to run codex CLI")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();

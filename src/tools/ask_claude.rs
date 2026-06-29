@@ -1,9 +1,12 @@
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use super::Tool;
+
+const CLAUDE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub struct AskClaudeTool {
     /// Session id from the previous ask_claude call in the current agent run,
@@ -61,8 +64,12 @@ impl Tool for AskClaudeTool {
         if let Some(ref id) = resume {
             cmd.args(["--resume", id]);
         }
+        cmd.kill_on_drop(true);
 
-        let output = cmd.output().await.context("Failed to run claude CLI")?;
+        let output = tokio::time::timeout(CLAUDE_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| anyhow::anyhow!("claude timed out after {:?}", CLAUDE_TIMEOUT))?
+            .context("Failed to run claude CLI")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
