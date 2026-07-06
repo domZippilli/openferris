@@ -53,7 +53,9 @@ impl Tool for RunSkillTool {
          Parameters: {\"skill_name\": \"<name>\", \"context\": \"<optional extra instructions or data>\"}. \
          Use this to delegate tasks to specialized skills like headline-scrape, daily-briefing, etc. \
          The subagent does the work (fetching, parsing, formatting) and returns the result to you. \
-         You are then responsible for delivering the result (e.g. sending via Telegram)."
+         Delivery tools are disabled inside the subagent: run_skill itself never sends email, Telegram messages, or other external delivery, even if the delegated skill normally would. \
+         If the result needs to be delivered, you must explicitly call send_email, send_telegram, or another delivery tool yourself after run_skill returns. \
+         Do not claim a delegated skill was delivered unless you personally called the delivery tool and it succeeded."
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {

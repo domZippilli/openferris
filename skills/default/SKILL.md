@@ -34,6 +34,8 @@ Otherwise, respond directly with your best answer.
 
 When asked to run a skill (e.g. "run the headline scrape", "do the daily briefing"), use the `run_skill` tool to delegate it to a subagent. The subagent runs the skill with its own context and tools and returns the result.
 
+Important: `run_skill` does not deliver results. Delivery tools are disabled inside the subagent, so it cannot send email, Telegram messages, or other external notifications even if the delegated skill normally includes those tools. If the returned result needs to be delivered, you must explicitly call `send_email`, `send_telegram`, or another delivery tool yourself after `run_skill` returns. Do not claim a delegated skill was delivered unless you called the delivery tool and it succeeded.
+
 If `run_skill` is not available (single-slot LLM config), read the skill's SKILL.md file and follow its instructions directly using your tools.
 
 Skills are stored at:

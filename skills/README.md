@@ -47,6 +47,7 @@ skill is invoked. Be specific about what you want the agent to do.
 - `gws` — Run a Google Workspace CLI command. Params: `{"command": "..."}`. Destructive operations (delete, trash, send, empty, remove) are blocked. Use send_email to send emails.
 - `gws.drive.download_file` — Download a small uploaded image file from Google Drive as base64. Params: `{"file_id": "...", "max_bytes": <optional>, "mime_type_allowlist": <optional>}`. Supports JPEG, PNG, WebP, GIF, BMP, and TIFF up to 1 MB. Prefer `gws.drive.download_file_to_path` for normal images.
 - `gws.drive.download_file_to_path` — Download an uploaded image file from Google Drive to a workspace path without returning file bytes. Params: `{"file_id": "...", "destination_path": "...", "max_bytes": <optional>, "mime_type_allowlist": <optional>}`. Supports JPEG, PNG, WebP, GIF, BMP, and TIFF up to 20 MB.
+- `run_skill` — Run another skill as a subagent and return its result as text. Delivery tools are disabled inside the subagent, so `run_skill` never sends email, Telegram messages, or other external delivery by itself. The caller must explicitly use `send_email`, `send_telegram`, or another delivery tool after `run_skill` returns.
 - `ask_claude` — Ask Claude Code for help. Params: `{"prompt": "..."}`
 - `ask_codex` — Ask Codex for help. Params: `{"prompt": "..."}`
 
