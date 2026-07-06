@@ -27,7 +27,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 /// Validates that a path resolves to somewhere within the allowed directories.
 /// Returns the canonicalized path if valid.
-fn validate_path(path: &str, allowed_dirs: &[PathBuf]) -> Result<PathBuf> {
+pub(crate) fn validate_path(path: &str, allowed_dirs: &[PathBuf]) -> Result<PathBuf> {
     let requested = PathBuf::from(path);
 
     // Expand ~ to home directory

@@ -4,6 +4,7 @@ pub mod datetime;
 pub mod files;
 pub mod gws;
 pub mod logs;
+pub mod ocr;
 pub mod run_skill;
 pub mod schedule;
 pub mod scrape;
@@ -90,12 +91,17 @@ impl ToolRegistry {
         let allowed_dirs = config::allowed_directories(&config.files);
         self.register(Box::new(files::ReadFileTool::new(allowed_dirs.clone())));
         self.register(Box::new(files::WriteFileTool::new(allowed_dirs.clone())));
-        self.register(Box::new(files::ListDirTool::new(allowed_dirs)));
+        self.register(Box::new(files::ListDirTool::new(allowed_dirs.clone())));
+        self.register(Box::new(ocr::OcrImageTool::new(allowed_dirs.clone())));
         self.register(Box::new(web::FetchUrlTool::new(
             config.fetch.allowed_local_ports.clone(),
         )));
         self.register(Box::new(schedule::ScheduleTool));
         self.register(Box::new(gws::GwsTool));
+        self.register(Box::new(gws::GwsDriveDownloadFileTool));
+        self.register(Box::new(gws::GwsDriveDownloadFileToPathTool::new(
+            allowed_dirs.clone(),
+        )));
         self.register(Box::new(logs::JournalLogsTool));
         self.register(Box::new(ask_claude::AskClaudeTool::new()));
         self.register(Box::new(ask_codex::AskCodexTool::new()));

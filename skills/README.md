@@ -39,11 +39,14 @@ skill is invoked. Be specific about what you want the agent to do.
 - `read_file` — Read a file. Params: `{"path": "..."}`
 - `write_file` — Write a file. Params: `{"path": "...", "content": "..."}`
 - `list_dir` — List directory contents. Params: `{"path": "..."}`
+- `ocr_image` — Extract text from an image file in the workspace without loading image bytes into context. Params: `{"path": "...", "min_confidence": <optional>, "max_items": <optional>}`.
 - `fetch_url` — Fetch a web page or API endpoint. Params: `{"url": "..."}`
 - `schedule` — Manage cron-based skill schedules. Params: `{"action": "add|remove|list", "skill_name": "...", "cron_expr": "..."}`
 - `send_telegram` — Send a message via Telegram. Params: `{"message": "...", "chat_id": <optional>}`
 - `send_email` — Send an email via Gmail. Params: `{"to": "...", "subject": "...", "body": "..."}`. Recipient must be in allowed contacts or a known contact.
 - `gws` — Run a Google Workspace CLI command. Params: `{"command": "..."}`. Destructive operations (delete, trash, send, empty, remove) are blocked. Use send_email to send emails.
+- `gws.drive.download_file` — Download a small uploaded image file from Google Drive as base64. Params: `{"file_id": "...", "max_bytes": <optional>, "mime_type_allowlist": <optional>}`. Supports JPEG, PNG, WebP, GIF, BMP, and TIFF up to 1 MB. Prefer `gws.drive.download_file_to_path` for normal images.
+- `gws.drive.download_file_to_path` — Download an uploaded image file from Google Drive to a workspace path without returning file bytes. Params: `{"file_id": "...", "destination_path": "...", "max_bytes": <optional>, "mime_type_allowlist": <optional>}`. Supports JPEG, PNG, WebP, GIF, BMP, and TIFF up to 20 MB.
 - `ask_claude` — Ask Claude Code for help. Params: `{"prompt": "..."}`
 - `ask_codex` — Ask Codex for help. Params: `{"prompt": "..."}`
 

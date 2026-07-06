@@ -6,6 +6,7 @@ tools:
   - read_file
   - write_file
   - list_dir
+  - ocr_image
   - fetch_url
   - web_search
   - scrape_url
@@ -14,6 +15,8 @@ tools:
   - send_telegram
   - send_email
   - gws
+  - gws.drive.download_file
+  - gws.drive.download_file_to_path
   - journal_logs
   - run_skill
   - ask_claude
