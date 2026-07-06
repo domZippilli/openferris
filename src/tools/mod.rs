@@ -122,6 +122,14 @@ impl ToolRegistry {
 
     /// Register tools that need access to the database.
     pub fn register_db_tools(&mut self, db_path: std::path::PathBuf, config: &AppConfig) {
+        if let Some(ref tg) = config.telegram {
+            self.register(Box::new(telegram::SendTelegramTool::new_with_storage(
+                tg.bot_token.clone(),
+                tg.default_chat_id,
+                db_path.clone(),
+            )));
+        }
+
         if let Some(ref gmail) = config.gmail {
             self.register(Box::new(send_email::SendEmailTool::new(
                 db_path,

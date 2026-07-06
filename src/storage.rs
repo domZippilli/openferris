@@ -71,7 +71,7 @@ impl Storage {
         // Load recent interactions (last 20, reversed to chronological)
         let mut stmt = self.conn.prepare(
             "SELECT timestamp, source, skill, user_message, agent_response
-             FROM interactions ORDER BY timestamp DESC LIMIT 20",
+             FROM interactions ORDER BY timestamp DESC, id DESC LIMIT 20",
         )?;
         let mut interactions: Vec<(String, String, Option<String>, String, String)> = stmt
             .query_map([], |row| {
@@ -94,11 +94,18 @@ impl Storage {
                     None => source.clone(),
                 };
                 ctx.push_str(&format!("[{} via {}]\n", ts, label));
-                ctx.push_str(&format!(
-                    "User: {}\nYou: {}\n\n",
-                    truncate(user_msg, 300),
-                    truncate(agent_msg, 500)
-                ));
+                if source == "telegram" && skill.as_deref() == Some("send_telegram") {
+                    ctx.push_str(&format!(
+                        "Outbound Telegram message: {}\n\n",
+                        truncate(agent_msg, 2000)
+                    ));
+                } else {
+                    ctx.push_str(&format!(
+                        "User: {}\nYou: {}\n\n",
+                        truncate(user_msg, 700),
+                        truncate(agent_msg, 2000)
+                    ));
+                }
             }
         }
 
@@ -182,6 +189,24 @@ mod tests {
         let s = temp_storage();
         let ctx = s.build_context().unwrap();
         assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_outbound_telegram_message_is_rendered_as_context() {
+        let s = temp_storage();
+        s.log_interaction(
+            "telegram",
+            Some("send_telegram"),
+            "Outbound Telegram message sent to chat 123",
+            "Daily briefing:\n1. Finish the report\n2. Confirm the schedule",
+        )
+        .unwrap();
+
+        let ctx = s.build_context().unwrap();
+        assert!(ctx.contains("telegram/send_telegram"));
+        assert!(ctx.contains("Outbound Telegram message: Daily briefing"));
+        assert!(ctx.contains("Finish the report"));
+        assert!(!ctx.contains("User: Outbound Telegram message sent"));
     }
 
     // Regression for P2-B: two Storage handles on the same file (simulating

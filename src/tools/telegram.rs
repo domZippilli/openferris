@@ -1,11 +1,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::path::PathBuf;
 
 use super::Tool;
+use crate::storage::Storage;
 
 pub struct SendTelegramTool {
     bot_token: String,
     default_chat_id: Option<i64>,
+    db_path: Option<PathBuf>,
 }
 
 impl SendTelegramTool {
@@ -13,6 +16,19 @@ impl SendTelegramTool {
         Self {
             bot_token,
             default_chat_id,
+            db_path: None,
+        }
+    }
+
+    pub fn new_with_storage(
+        bot_token: String,
+        default_chat_id: Option<i64>,
+        db_path: PathBuf,
+    ) -> Self {
+        Self {
+            bot_token,
+            default_chat_id,
+            db_path: Some(db_path),
         }
     }
 }
@@ -72,6 +88,24 @@ impl Tool for SendTelegramTool {
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 anyhow::bail!("Telegram API error: {}", body);
+            }
+        }
+
+        if let Some(db_path) = &self.db_path {
+            match Storage::open(db_path) {
+                Ok(store) => {
+                    if let Err(e) = store.log_interaction(
+                        "telegram",
+                        Some("send_telegram"),
+                        &format!("Outbound Telegram message sent to chat {}", chat_id),
+                        message,
+                    ) {
+                        tracing::warn!("Failed to log outbound Telegram message: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open storage for Telegram delivery log: {}", e);
+                }
             }
         }
 
