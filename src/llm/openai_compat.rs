@@ -23,6 +23,7 @@ pub struct OpenAiCompatBackend {
     model: Option<String>,
     temperature: f32,
     top_k: u32,
+    enable_thinking: bool,
     slot: i32,
     /// Per-slot context window discovered from the server's `/props` endpoint.
     /// Cached after first successful fetch; never refreshed within a process.
@@ -46,6 +47,13 @@ struct ChatRequest {
     /// caller wants per-chunk delivery; non-streaming callers omit it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
+}
+
+#[derive(Clone, Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +74,10 @@ struct StreamChoice {
 struct StreamDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -90,9 +102,11 @@ struct Choice {
 struct ResponseMessage {
     content: String,
     /// Gemma 4 (and other reasoning models) emit chain-of-thought tokens into
-    /// this separate field when llama.cpp's chat-template parser is splitting
+    /// these separate fields when the backend's chat-template parser splits
     /// them off `content`. Captured for observability only — not fed back into
     /// the agent loop.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
 }
@@ -103,6 +117,7 @@ impl OpenAiCompatBackend {
         model: Option<String>,
         temperature: f32,
         top_k: u32,
+        enable_thinking: bool,
         slot: i32,
     ) -> Result<Self> {
         // Chat completions are non-streaming: llama-server is silent on the
@@ -123,8 +138,15 @@ impl OpenAiCompatBackend {
             model,
             temperature,
             top_k,
+            enable_thinking,
             slot,
             n_ctx: OnceCell::new(),
+        })
+    }
+
+    fn chat_template_kwargs(&self) -> Option<ChatTemplateKwargs> {
+        self.enable_thinking.then_some(ChatTemplateKwargs {
+            enable_thinking: true,
         })
     }
 }
@@ -171,6 +193,7 @@ impl LlmBackend for OpenAiCompatBackend {
             temperature: self.temperature,
             top_k: self.top_k,
             stream: false,
+            chat_template_kwargs: self.chat_template_kwargs(),
         };
 
         let url = format!(
@@ -215,7 +238,11 @@ impl LlmBackend for OpenAiCompatBackend {
             }
         }
 
-        if let Some(reasoning) = &choice.message.reasoning_content
+        if let Some(reasoning) = choice
+            .message
+            .reasoning
+            .as_ref()
+            .or(choice.message.reasoning_content.as_ref())
             && !reasoning.is_empty()
         {
             tracing::debug!("LLM reasoning ({} chars): {}", reasoning.len(), reasoning);
@@ -245,6 +272,7 @@ impl LlmBackend for OpenAiCompatBackend {
             temperature: self.temperature,
             top_k: self.top_k,
             stream: true,
+            chat_template_kwargs: self.chat_template_kwargs(),
         };
 
         let url = format!(
@@ -279,6 +307,7 @@ impl LlmBackend for OpenAiCompatBackend {
         // a time, only attempting UTF-8 decode on whole messages.
         let mut buffer: Vec<u8> = Vec::new();
         let mut accumulated = String::new();
+        let mut reasoning_accumulated = String::new();
         let mut final_finish_reason: Option<String> = None;
         let mut done = false;
 
@@ -327,6 +356,12 @@ impl LlmBackend for OpenAiCompatBackend {
                     if let Some(reason) = choice.finish_reason {
                         final_finish_reason = Some(reason);
                     }
+                    if let Some(reasoning) =
+                        choice.delta.reasoning.or(choice.delta.reasoning_content)
+                        && !reasoning.is_empty()
+                    {
+                        reasoning_accumulated.push_str(&reasoning);
+                    }
                     if let Some(content) = choice.delta.content {
                         if !content.is_empty() {
                             on_chunk(&content);
@@ -347,6 +382,13 @@ impl LlmBackend for OpenAiCompatBackend {
                     "LLM output truncated (finish_reason=length) — response may be incomplete"
                 );
             }
+        }
+        if !reasoning_accumulated.is_empty() {
+            tracing::debug!(
+                "LLM reasoning ({} chars): {}",
+                reasoning_accumulated.len(),
+                reasoning_accumulated
+            );
         }
 
         Ok(accumulated)

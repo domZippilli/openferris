@@ -478,6 +478,7 @@ fn create_llm_backend(
                 config.llm.model.clone(),
                 config.llm.temperature,
                 config.llm.top_k,
+                config.llm.enable_thinking,
                 slot,
             )?))
         }
@@ -491,6 +492,7 @@ fn create_llm_backend(
                 config.llm.model.clone(),
                 config.llm.temperature,
                 config.llm.top_k,
+                config.llm.enable_thinking,
                 slot,
             )?))
         }

@@ -64,6 +64,10 @@ pub struct LlmConfig {
     /// local vLLM MTP benchmark defaults unless explicitly overridden.
     #[serde(default = "default_top_k")]
     pub top_k: u32,
+    /// Pass `enable_thinking=true` through chat_template_kwargs for backends
+    /// like vLLM/Gemma4 that require explicit opt-in to reasoning channels.
+    #[serde(default)]
+    pub enable_thinking: bool,
     /// Number of parallel slots on OpenAI-compatible servers that support slot pinning.
     /// Set >1 to enable subagent support (parent uses slot 0, subagents use 1+).
     #[serde(default = "default_parallel_slots")]

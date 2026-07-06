@@ -47,6 +47,7 @@ backend = "openai_compat"
 endpoint = "http://localhost:8080"
 temperature = 0.6
 top_k = 20
+enable_thinking = true
 
 [daemon]
 listen = "127.0.0.1:7700"
@@ -218,6 +219,7 @@ endpoint = "http://localhost:8080"  # OpenAI-compatible server URL
 model = "my-model"               # Optional model name
 temperature = 0.6                # Sampling temperature
 top_k = 20                       # Sampling top-k
+enable_thinking = true           # Enable reasoning chat-template mode when supported
 
 [daemon]
 listen = "127.0.0.1:7700"       # TCP address for the daemon

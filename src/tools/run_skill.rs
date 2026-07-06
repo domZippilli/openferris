@@ -82,6 +82,7 @@ impl Tool for RunSkillTool {
             self.llm_config.model.clone(),
             self.llm_config.temperature,
             self.llm_config.top_k,
+            self.llm_config.enable_thinking,
             1,
         )?);
 
