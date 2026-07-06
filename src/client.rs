@@ -32,6 +32,19 @@ pub async fn send_skill(socket_path: &str, skill_name: &str) -> Result<String> {
     send_request(socket_path, &request).await
 }
 
+pub async fn send_goal(socket_path: &str, exit_criteria: &str, max_turns: usize) -> Result<String> {
+    let request = DaemonRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: RequestKind::PursueGoal {
+            exit_criteria: exit_criteria.to_string(),
+            max_turns,
+        },
+        source: Some("cli".to_string()),
+        session_id: None,
+    };
+    send_request(socket_path, &request).await
+}
+
 pub async fn send_request(socket_path: &str, request: &DaemonRequest) -> Result<String> {
     let stream = UnixStream::connect(socket_path)
         .await

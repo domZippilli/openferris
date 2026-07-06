@@ -28,6 +28,8 @@ struct QueuedRequest {
 /// context, the current turn, and tool round-trips (the agent still compacts
 /// in-run as a backstop). Half keeps a fresh turn comfortably within budget.
 const HISTORY_TOKEN_FRACTION: f32 = 0.5;
+const GOAL_SKILL_NAME: &str = "goal-pursuit";
+const GOAL_MAX_TURNS_HARD: usize = 25;
 
 /// Drop whole oldest turns (user+assistant pairs) from the front until the
 /// estimated token count fits `budget`. Always keeps at least the most recent
@@ -469,7 +471,160 @@ async fn process_request(
                 ),
             }
         }
+        RequestKind::PursueGoal {
+            exit_criteria,
+            max_turns,
+        } => match skills::load_skill(GOAL_SKILL_NAME, user_skills_dir) {
+            Ok(skill) => match pursue_goal(
+                agent,
+                &skill,
+                exit_criteria,
+                *max_turns,
+                identity,
+                user_profile,
+                persistent_context,
+                progress_tx.clone(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    let log = LogData {
+                        source,
+                        skill: Some(GOAL_SKILL_NAME.to_string()),
+                        user_message: format!("Pursue goal with exit criteria: {}", exit_criteria),
+                        result: result.clone(),
+                    };
+                    let response = DaemonResponse {
+                        request_id,
+                        kind: ResponseKind::Done {
+                            text: result.response,
+                        },
+                    };
+                    (response, Some(log))
+                }
+                Err(e) => (
+                    DaemonResponse {
+                        request_id,
+                        kind: ResponseKind::Error {
+                            message: format!("{:#}", e),
+                        },
+                    },
+                    None,
+                ),
+            },
+            Err(e) => (
+                DaemonResponse {
+                    request_id,
+                    kind: ResponseKind::Error {
+                        message: format!("{:#}", e),
+                    },
+                },
+                None,
+            ),
+        },
         // StoreMemory is handled directly in the worker loop above.
         RequestKind::StoreMemory { .. } => unreachable!(),
     }
+}
+
+async fn pursue_goal(
+    agent: &Agent,
+    skill: &openferris::skills::Skill,
+    exit_criteria: &str,
+    requested_max_turns: usize,
+    identity: &str,
+    user_profile: &str,
+    persistent_context: &str,
+    progress_tx: mpsc::UnboundedSender<AgentNotification>,
+) -> Result<AgentResult> {
+    if requested_max_turns == 0 || requested_max_turns > GOAL_MAX_TURNS_HARD {
+        anyhow::bail!("max_turns must be between 1 and {}", GOAL_MAX_TURNS_HARD);
+    }
+
+    let mut history: Vec<ChatMessage> = Vec::new();
+    let mut final_memories: Vec<String> = Vec::new();
+    let mut last_response = String::new();
+
+    for turn in 1..=requested_max_turns {
+        let _ = progress_tx.send(AgentNotification::ToolProgress(format!(
+            "Goal turn {}/{}...",
+            turn, requested_max_turns
+        )));
+
+        let prompt = if turn == 1 {
+            format!(
+                "Pursue this goal.\n\nExit criteria:\n{}\n\nYou have at most {} inference turns. Work on the goal now.",
+                exit_criteria, requested_max_turns
+            )
+        } else {
+            format!(
+                "Continue pursuing the same goal.\n\nExit criteria:\n{}\n\nThis is inference turn {} of {}. Continue from the prior work.",
+                exit_criteria, turn, requested_max_turns
+            )
+        };
+
+        // Do not stream assistant prose for goal mode: intermediate turns are
+        // working state, and TUI clients suppress the final Done text once any
+        // AssistantChunk has rendered.
+        let result = agent
+            .run(
+                skill,
+                &prompt,
+                &history,
+                identity,
+                user_profile,
+                persistent_context,
+                None,
+            )
+            .await?;
+
+        final_memories.extend(result.memories);
+        let status = extract_goal_status(&result.response);
+        let clean_response = strip_goal_status(&result.response);
+        last_response = clean_response.clone();
+
+        history.push(ChatMessage {
+            role: Role::User,
+            content: prompt,
+        });
+        history.push(ChatMessage {
+            role: Role::Assistant,
+            content: result.response,
+        });
+
+        if matches!(status.as_deref(), Some("done")) {
+            return Ok(AgentResult {
+                response: clean_response,
+                memories: final_memories,
+            });
+        }
+    }
+
+    Ok(AgentResult {
+        response: format!(
+            "Stopped after reaching the max turn limit ({}).\n\n{}",
+            requested_max_turns, last_response
+        ),
+        memories: final_memories,
+    })
+}
+
+fn extract_goal_status(text: &str) -> Option<String> {
+    let start = text.find("<goal_status>")? + "<goal_status>".len();
+    let end = text[start..].find("</goal_status>")? + start;
+    Some(text[start..end].trim().to_ascii_lowercase())
+}
+
+fn strip_goal_status(text: &str) -> String {
+    let Some(start) = text.find("<goal_status>") else {
+        return text.trim().to_string();
+    };
+    let Some(rel_end) = text[start..].find("</goal_status>") else {
+        return text.trim().to_string();
+    };
+    let end = start + rel_end + "</goal_status>".len();
+    let mut out = String::new();
+    out.push_str(&text[..start]);
+    out.push_str(&text[end..]);
+    out.trim().to_string()
 }

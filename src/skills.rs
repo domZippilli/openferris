@@ -60,6 +60,7 @@ fn get_bundled_skill(name: &str) -> Option<&'static str> {
         "default" => Some(include_str!("../skills/default/SKILL.md")),
         "daily-briefing" => Some(include_str!("../skills/daily-briefing/SKILL.md")),
         "email-reply" => Some(include_str!("../skills/email-reply/SKILL.md")),
+        "goal-pursuit" => Some(include_str!("../skills/goal-pursuit/SKILL.md")),
         _ => None,
     }
 }

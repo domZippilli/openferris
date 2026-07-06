@@ -46,6 +46,15 @@ enum Commands {
         /// Skill name to execute
         skill_name: String,
     },
+    /// Pursue a goal over multiple bounded inference turns
+    Goal {
+        /// Maximum inference turns before stopping
+        #[arg(long, default_value_t = 5)]
+        max_turns: usize,
+        /// Exit criteria that define when the goal is complete
+        #[arg(required = true, trailing_var_arg = true)]
+        exit_criteria: Vec<String>,
+    },
     /// Start the Telegram bot listener
     Telegram,
     /// Start the Gmail listener
@@ -266,6 +275,61 @@ async fn main() -> Result<()> {
                             "cli",
                             Some(&skill_name),
                             &format!("run {}", skill_name),
+                            &msg,
+                        )
+                    {
+                        eprintln!("also failed to log interaction: {}", log_err);
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Goal {
+            max_turns,
+            exit_criteria,
+        } => {
+            let exit_criteria = exit_criteria.join(" ");
+            let primary = config.daemon.socket.clone();
+            let outcome = match client::send_goal(&primary, &exit_criteria, max_turns).await {
+                Ok(r) => Ok(r),
+                Err(primary_err) => {
+                    match client::read_socket_pointer() {
+                        Some(fallback) if fallback != primary => {
+                            match client::send_goal(&fallback, &exit_criteria, max_turns).await {
+                                Ok(r) => {
+                                    tracing::warn!(
+                                        "Connected via daemon-published socket {} (primary {} unreachable)",
+                                        fallback,
+                                        primary
+                                    );
+                                    Ok(r)
+                                }
+                                Err(fallback_err) => Err(anyhow::anyhow!(
+                                    "daemon unreachable:\n  primary {}: {:#}\n  fallback {}: {:#}",
+                                    primary,
+                                    primary_err,
+                                    fallback,
+                                    fallback_err
+                                )),
+                            }
+                        }
+                        _ => Err(primary_err
+                            .context(format!("daemon unreachable at socket {}", primary))),
+                    }
+                }
+            };
+
+            match outcome {
+                Ok(response) => println!("{}", response),
+                Err(e) => {
+                    let msg = format!("{:#}", e);
+                    eprintln!("openferris goal: {}", msg);
+                    if let Ok(store) =
+                        storage::Storage::open(&config::data_dir().join("openferris.db"))
+                        && let Err(log_err) = store.log_interaction(
+                            "cli",
+                            Some("goal-pursuit"),
+                            &format!("goal {}", exit_criteria),
                             &msg,
                         )
                     {

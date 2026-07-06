@@ -99,6 +99,7 @@ If a previous entry exists for today, append to it rather than overwriting.
 ## How Skills Are Invoked
 
 - **By name:** `openferris run my-skill`
+- **Bounded goal mode:** `openferris goal --max-turns 5 <exit criteria>` or `/goal --max-turns 5 <exit criteria>` in the TUI/Telegram
 - **Via cron:** `0 7 * * * openferris run daily-briefing`
 - **Freeform messages** use the `default` skill automatically.
 

@@ -171,7 +171,7 @@ The `tools` field controls which tools are visible to the agent during that skil
 
 Note: the tool list is a **focus mechanism, not a security boundary**. Since the agent can create its own skills in the workspace, it can give itself access to any registered tool. The real security boundary is the **tool registry** — only tools compiled into the binary exist. The agent cannot invent new tools or escape the sandbox.
 
-**Bundled skills:** `default` (freeform conversation) and `daily-briefing`.
+**Bundled skills:** `default` (freeform conversation), `daily-briefing`, `email-reply`, and `goal-pursuit`.
 
 Skill lookup order:
 

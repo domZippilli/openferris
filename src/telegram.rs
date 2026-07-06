@@ -90,7 +90,7 @@ async fn handle_message(
     base_url: &str,
     chat_id: i64,
 ) -> String {
-    // Handle /remember command
+    // Handle slash commands.
     let request = if let Some(fact) = text.strip_prefix("/remember ") {
         let fact = fact.trim();
         if fact.is_empty() {
@@ -100,6 +100,20 @@ async fn handle_message(
             id: uuid::Uuid::new_v4().to_string(),
             kind: RequestKind::StoreMemory {
                 content: fact.to_string(),
+            },
+            source: Some("telegram".to_string()),
+            session_id: None,
+        }
+    } else if let Some(args) = text.strip_prefix("/goal ") {
+        let (max_turns, exit_criteria) = match parse_goal_args(args) {
+            Ok(parsed) => parsed,
+            Err(e) => return e,
+        };
+        DaemonRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: RequestKind::PursueGoal {
+                exit_criteria,
+                max_turns,
             },
             source: Some("telegram".to_string()),
             session_id: None,
@@ -121,6 +135,38 @@ async fn handle_message(
         Ok(text) => text,
         Err(e) => format!("Error: {:#}", e),
     }
+}
+
+fn parse_goal_args(input: &str) -> Result<(usize, String), String> {
+    let mut parts = input.split_whitespace().peekable();
+    let mut max_turns = 5usize;
+    let mut criteria = Vec::new();
+
+    while let Some(part) = parts.next() {
+        if part == "--max-turns" {
+            let Some(raw) = parts.next() else {
+                return Err("Usage: /goal [--max-turns N] <exit criteria>".to_string());
+            };
+            max_turns = raw
+                .parse::<usize>()
+                .map_err(|_| "max turns must be a positive integer".to_string())?;
+        } else if let Some(raw) = part.strip_prefix("--max-turns=") {
+            max_turns = raw
+                .parse::<usize>()
+                .map_err(|_| "max turns must be a positive integer".to_string())?;
+        } else {
+            criteria.push(part);
+            criteria.extend(parts);
+            break;
+        }
+    }
+
+    let exit_criteria = criteria.join(" ").trim().to_string();
+    if exit_criteria.is_empty() {
+        return Err("Usage: /goal [--max-turns N] <exit criteria>".to_string());
+    }
+
+    Ok((max_turns, exit_criteria))
 }
 
 /// Telegram messages are capped at 4096 chars. We leave a little headroom for

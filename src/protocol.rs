@@ -25,6 +25,10 @@ pub enum RequestKind {
     FreeformMessage {
         text: String,
     },
+    PursueGoal {
+        exit_criteria: String,
+        max_turns: usize,
+    },
     StoreMemory {
         content: String,
     },
