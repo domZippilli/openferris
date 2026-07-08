@@ -144,17 +144,24 @@ async fn run_with_wakeup_tick(
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     }
     // Publish the resolved socket path so CLI clients that compute a different
-    // default (e.g. cron without $XDG_RUNTIME_DIR) can fall back to the real one.
-    let pointer = config::socket_pointer_path();
-    if let Some(parent) = pointer.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&pointer, &socket_path) {
-        tracing::warn!(
-            "Failed to write socket pointer file {}: {}",
-            pointer.display(),
-            e
-        );
+    // default (e.g. cron without $XDG_RUNTIME_DIR) can fall back to the real
+    // one. Never under cfg(test): the integration tests in this file run real
+    // daemons on tempdir sockets, and writing those paths to the REAL data
+    // dir once left the pointer aiming at a vanished tempdir. (The pointer is
+    // only ever read by client fallback, never to choose a bind address.)
+    #[cfg(not(test))]
+    {
+        let pointer = config::socket_pointer_path();
+        if let Some(parent) = pointer.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&pointer, &socket_path) {
+            tracing::warn!(
+                "Failed to write socket pointer file {}: {}",
+                pointer.display(),
+                e
+            );
+        }
     }
     tracing::info!("OpenFerris daemon listening on {}", socket_path);
 

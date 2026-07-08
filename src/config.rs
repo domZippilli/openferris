@@ -194,16 +194,14 @@ pub fn allowed_directories(config: &FilesConfig) -> Vec<PathBuf> {
 }
 
 fn default_socket() -> String {
-    // If a running daemon has published its socket path, trust that — it
-    // resolves env divergence (notably cron without $XDG_RUNTIME_DIR) before
-    // the client attempts to connect.
-    if let Ok(content) = std::fs::read_to_string(socket_pointer_path()) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    // Otherwise prefer XDG_RUNTIME_DIR (per-user, tmpfs, correct permissions).
+    // Deliberately does NOT consult the socket pointer file: the daemon uses
+    // this value to decide where to BIND, and the pointer records where some
+    // previous daemon (or a test-run daemon on a tempdir path) bound —
+    // trusting it here once crash-looped the daemon on a stale temp path.
+    // Clients that need pointer fallback (notably cron, which lacks
+    // $XDG_RUNTIME_DIR) read socket_pointer_path() explicitly after the
+    // primary path fails to connect (see main.rs Run/Goal).
+    // Prefer XDG_RUNTIME_DIR (per-user, tmpfs, correct permissions).
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         format!("{}/openferris.sock", runtime_dir)
     } else {
