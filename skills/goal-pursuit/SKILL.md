@@ -82,3 +82,5 @@ This marker is scoped to *this run only* -- it is separate from the goal file's 
 `<goal_status>done</goal_status>` when you're done spending turns for this run -- whether the goal file ends up `active` with a future `next_check`, `done`, or `abandoned`.
 
 Your final chat response (above the marker) is what the human sees immediately -- summarize the outcome in plain language, including when you'll check back, not just in the file.
+
+A `done` claim is independently checked against the exit criteria by a separate evaluator call before it's accepted -- so don't mark a turn `done` until they're genuinely met. If the checker disputes a `done` claim, the next turn will carry its reason; if it's simply wrong, say exactly why in your next response and finish.

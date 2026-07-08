@@ -46,6 +46,17 @@ impl Agent {
         self.llm.context_window_tokens().await
     }
 
+    /// Bare chat completion, bypassing the tool-calling loop, system prompt
+    /// assembly, and compaction entirely. For small, self-contained auxiliary
+    /// calls that are not a full agent run — currently only the goal-pursuit
+    /// done-claim evaluator in `daemon.rs` (refactor plan 1.4), which needs a
+    /// strict-verifier system prompt and no tools at all. Do not use this for
+    /// anything that should go through `run`'s tool loop or context
+    /// management.
+    pub async fn raw_completion(&self, messages: &[ChatMessage]) -> Result<String> {
+        self.llm.chat_completion(messages).await
+    }
+
     /// Run the agent loop for a skill with a user message.
     /// `history` contains prior conversation messages (for TUI sessions).
     /// `persistent_context` is loaded from storage (memories + recent interactions).

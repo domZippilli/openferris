@@ -40,6 +40,17 @@ const DEFAULT_HISTORY_TOKEN_BUDGET: usize = 50_000;
 const GOAL_SKILL_NAME: &str = "goal-pursuit";
 const GOAL_MAX_TURNS_HARD: usize = 25;
 
+/// Max number of times, within a single goal-pursuit run, that the evaluator
+/// (see `evaluate_done`) may reject a turn's `<goal_status>done</goal_status>`
+/// claim before the daemon just accepts it. The per-run turn budget
+/// (`requested_max_turns`, capped by `GOAL_MAX_TURNS_HARD`) is the ultimate
+/// backstop against a runaway loop, so this cap exists only to stop the
+/// worker model and the evaluator from disagreeing forever when the
+/// evaluator itself is being unreasonable — past the cap we trust the
+/// worker's self-report and move on (with a `tracing::warn!`, so it's visible
+/// in logs that the evaluator was overridden).
+const GOAL_MAX_EVALUATOR_REJECTIONS: usize = 2;
+
 /// How often the daemon polls for due wakeups (see `set_wakeup`/1.3 in the
 /// refactor plan). ~a minute matches the tool's "fires within about a
 /// minute of `due`" promise to the LLM without polling SQLite too eagerly.
@@ -784,6 +795,10 @@ async fn pursue_goal(
     let mut history: Vec<ChatMessage> = Vec::new();
     let mut final_memories: Vec<String> = Vec::new();
     let mut last_response = String::new();
+    // Set when the evaluator rejects a "done" claim; carries its reason into
+    // the next turn's prompt (see the `Verdict::NotMet` arm below).
+    let mut pending_rejection: Option<String> = None;
+    let mut evaluator_rejections = 0usize;
 
     for turn in 1..=requested_max_turns {
         let _ = progress_tx.send(AgentNotification::ToolProgress(format!(
@@ -795,6 +810,11 @@ async fn pursue_goal(
             format!(
                 "Pursue this goal.\n\nExit criteria:\n{}\n\nYou have at most {} inference turns. Work on the goal now.",
                 exit_criteria, requested_max_turns
+            )
+        } else if let Some(reason) = pending_rejection.take() {
+            format!(
+                "An independent check of your work against the exit criteria found them not yet met: {}\n\nContinue working, or if the evaluator is wrong, state exactly why and finish.\n\nExit criteria:\n{}\n\nThis is inference turn {} of {}.",
+                reason, exit_criteria, turn, requested_max_turns
             )
         } else {
             format!(
@@ -833,10 +853,43 @@ async fn pursue_goal(
         });
 
         if matches!(status.as_deref(), Some("done")) {
-            return Ok(AgentResult {
-                response: clean_response,
-                memories: final_memories,
-            });
+            if evaluator_rejections >= GOAL_MAX_EVALUATOR_REJECTIONS {
+                tracing::warn!(
+                    "Goal evaluator rejection cap ({}) reached; accepting the model's \
+                     done claim without further evaluation",
+                    GOAL_MAX_EVALUATOR_REJECTIONS
+                );
+                return Ok(AgentResult {
+                    response: clean_response,
+                    memories: final_memories,
+                });
+            }
+
+            match evaluate_done(agent, exit_criteria, &clean_response).await {
+                Verdict::Met => {
+                    return Ok(AgentResult {
+                        response: clean_response,
+                        memories: final_memories,
+                    });
+                }
+                Verdict::NotMet(reason) => {
+                    evaluator_rejections += 1;
+                    tracing::info!(
+                        "Evaluator rejected done claim ({}/{}): {}",
+                        evaluator_rejections,
+                        GOAL_MAX_EVALUATOR_REJECTIONS,
+                        reason
+                    );
+                    let _ = progress_tx.send(AgentNotification::ToolProgress(format!(
+                        "Evaluator: not yet met ({}/{} rejections) — continuing...",
+                        evaluator_rejections, GOAL_MAX_EVALUATOR_REJECTIONS
+                    )));
+                    pending_rejection = Some(reason);
+                    // Fall through: the loop continues to the next turn
+                    // instead of returning, feeding `pending_rejection` into
+                    // the next prompt above.
+                }
+            }
         }
     }
 
@@ -863,6 +916,115 @@ fn strip_goal_status(text: &str) -> String {
         return text.trim().to_string();
     };
     let end = start + rel_end + "</goal_status>".len();
+    let mut out = String::new();
+    out.push_str(&text[..start]);
+    out.push_str(&text[end..]);
+    out.trim().to_string()
+}
+
+/// Result of `evaluate_done` judging a turn's `<goal_status>done</goal_status>`
+/// claim against the goal's exit criteria.
+enum Verdict {
+    Met,
+    /// Carries the evaluator's one-to-two sentence reason, fed back to the
+    /// worker as the next turn's prompt.
+    NotMet(String),
+}
+
+/// System prompt for the goal-pursuit done-claim evaluator (refactor plan
+/// 1.4). Cast strictly as an independent verifier rather than a collaborator:
+/// the whole point of this extra call is to catch a worker model grading its
+/// own homework and declaring victory prematurely.
+const EVALUATOR_SYSTEM_PROMPT: &str = "You are a strict, independent verifier for an autonomous \
+agent's goal-pursuit system. You will be given a goal's exit criteria and the text of a response \
+the agent produced while claiming the goal is now done. Your only job is to judge whether the \
+response text actually demonstrates that the exit criteria are met -- not whether the agent \
+sounds confident, not whether it tried hard, not whether it's plausible that it's done. Be \
+skeptical of vague claims, unfinished steps, and hedged language dressed up as completion. \
+Respond with exactly one verdict tag -- <verdict>met</verdict> or <verdict>not_met</verdict> -- \
+followed by a one-to-two sentence reason. Nothing else.";
+
+/// Ask a fresh, tool-free LLM call to independently judge whether a
+/// goal-pursuit turn's `<goal_status>done</goal_status>` claim is actually
+/// justified by that turn's own response, given the goal's exit criteria.
+/// This is a bare completion via `Agent::raw_completion` (system + user
+/// message, no tools, no skill prompt) — deliberately not a full `Agent::run`,
+/// since the evaluator's job is to judge, not to act.
+///
+/// Limitation: the daemon does not read the goal file. Goal files live in the
+/// agent's own workspace (`~/.local/share/openferris/workspace/goals/`), and
+/// the daemon deliberately never reads agent-owned files (see refactor plan
+/// 1.2/1.3 — the daemon only ever writes instructions and reads back model
+/// output). So the evaluator judges only the exit criteria plus this turn's
+/// response text; it has no visibility into the goal file's plan/progress
+/// log/prior turns beyond what the response text itself restates. A
+/// sufficiently persuasive but inaccurate response could still fool it. A
+/// richer evaluation would require the daemon to read agent workspace files,
+/// which is out of scope here.
+///
+/// Fails open on any evaluator trouble (backend error, malformed/missing
+/// verdict): an evaluator outage must not be able to block goal completion
+/// forever, so ambiguity resolves to `Verdict::Met` with a `tracing::warn!`.
+async fn evaluate_done(agent: &Agent, exit_criteria: &str, response_text: &str) -> Verdict {
+    let messages = vec![
+        ChatMessage {
+            role: Role::System,
+            content: EVALUATOR_SYSTEM_PROMPT.to_string(),
+        },
+        ChatMessage {
+            role: Role::User,
+            content: format!(
+                "Exit criteria:\n{}\n\nThe agent's response for this turn, which claims the goal \
+                 is done:\n{}\n\nIs the goal actually met, per the exit criteria? Answer with \
+                 exactly one verdict tag, then your one-to-two sentence reason.",
+                exit_criteria, response_text
+            ),
+        },
+    ];
+
+    match agent.raw_completion(&messages).await {
+        Ok(text) => match extract_verdict(&text).as_deref() {
+            Some("met") => Verdict::Met,
+            Some("not_met") => Verdict::NotMet(strip_verdict(&text)),
+            _ => {
+                tracing::warn!(
+                    "Goal evaluator returned a missing/malformed verdict, treating as met \
+                     (fail open): {}",
+                    text
+                );
+                Verdict::Met
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                "Goal evaluator call failed, treating as met (fail open): {}",
+                e
+            );
+            Verdict::Met
+        }
+    }
+}
+
+/// Extract the lowercased, trimmed content of a `<verdict>...</verdict>` tag,
+/// mirroring `extract_goal_status`'s style. Returns `None` if the tag is
+/// missing or unclosed — callers treat that as fail-open (see
+/// `evaluate_done`).
+fn extract_verdict(text: &str) -> Option<String> {
+    let start = text.find("<verdict>")? + "<verdict>".len();
+    let end = text[start..].find("</verdict>")? + start;
+    Some(text[start..end].trim().to_ascii_lowercase())
+}
+
+/// Strip the `<verdict>...</verdict>` tag out of the evaluator's response,
+/// leaving the reason text, mirroring `strip_goal_status`'s style.
+fn strip_verdict(text: &str) -> String {
+    let Some(start) = text.find("<verdict>") else {
+        return text.trim().to_string();
+    };
+    let Some(rel_end) = text[start..].find("</verdict>") else {
+        return text.trim().to_string();
+    };
+    let end = start + rel_end + "</verdict>".len();
     let mut out = String::new();
     out.push_str(&text[..start]);
     out.push_str(&text[end..]);
@@ -929,6 +1091,41 @@ mod tests {
             resolve_counterparty("telegram:555", &config),
             "telegram:555"
         );
+    }
+
+    #[test]
+    fn test_extract_verdict_met_well_formed() {
+        let text = "<verdict>met</verdict> The response cites a concrete confirmation.";
+        assert_eq!(extract_verdict(text).as_deref(), Some("met"));
+    }
+
+    #[test]
+    fn test_extract_verdict_not_met_well_formed() {
+        let text = "<verdict>not_met</verdict> No evidence the email was actually sent.";
+        assert_eq!(extract_verdict(text).as_deref(), Some("not_met"));
+    }
+
+    #[test]
+    fn test_extract_verdict_missing() {
+        let text = "I think this looks good overall.";
+        assert_eq!(extract_verdict(text), None);
+    }
+
+    #[test]
+    fn test_extract_verdict_malformed_unclosed_tag() {
+        // Opening tag with no matching close — must not panic or misparse.
+        let text = "<verdict>not_met the criteria are not satisfied";
+        assert_eq!(extract_verdict(text), None);
+    }
+
+    #[test]
+    fn test_extract_verdict_embedded_in_prose() {
+        let text = "Looking at the exit criteria closely, <verdict>not_met</verdict> because \
+                     step 3 was never actually completed.";
+        assert_eq!(extract_verdict(text).as_deref(), Some("not_met"));
+        let reason = strip_verdict(text);
+        assert!(!reason.contains("<verdict>"));
+        assert!(reason.contains("step 3 was never actually completed"));
     }
 
     /// A `LlmBackend` that forwards to a shared `Arc<MockLlm>`, so a test can
@@ -1108,5 +1305,125 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A minimal skill for `pursue_goal` tests below — no tools, empty
+    /// prompt: only the evaluator loop's own behavior is under test here, not
+    /// skill content or tool execution.
+    fn test_goal_skill() -> openferris::skills::Skill {
+        openferris::skills::Skill {
+            name: "goal-pursuit".to_string(),
+            description: "test".to_string(),
+            tools: vec![],
+            prompt: "Pursue the goal.".to_string(),
+        }
+    }
+
+    /// Refactor plan 1.4: the evaluator must reject a premature "done" claim
+    /// once, feed its reason back as the next turn's prompt, then accept the
+    /// second "done" once the evaluator agrees it's actually met. Exercises
+    /// the full call sequence: worker turn 1 -> evaluator (not_met) ->
+    /// worker turn 2 -> evaluator (met) -> run ends. Every LLM call
+    /// (worker or evaluator) consumes one scripted MockLlm response in
+    /// order, so the script below has exactly 4 entries for 2 work turns.
+    #[tokio::test]
+    async fn test_evaluator_rejects_then_accepts_done() {
+        let mock = Arc::new(MockLlm::new(vec![
+            // Turn 1: worker claims done prematurely.
+            "I looked into it.\n<goal_status>done</goal_status>".to_string(),
+            // Evaluator: rejects it.
+            "<verdict>not_met</verdict> The response doesn't demonstrate the email was \
+             actually sent, which the exit criteria requires."
+                .to_string(),
+            // Turn 2: worker addresses the evaluator's reason and claims done again.
+            "I actually sent the email this time.\n<goal_status>done</goal_status>".to_string(),
+            // Evaluator: accepts it.
+            "<verdict>met</verdict> The response confirms the email was sent.".to_string(),
+        ]));
+        let agent = Agent::new(
+            Box::new(ArcMockLlm(mock.clone())),
+            ToolRegistry::new(),
+            String::new(),
+        );
+        let skill = test_goal_skill();
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel::<AgentNotification>();
+
+        let result = pursue_goal(
+            &agent,
+            &skill,
+            "Send the owner a confirmation email.",
+            5,
+            "",
+            "",
+            "",
+            progress_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            mock.call_count(),
+            4,
+            "expected 2 work turns + 2 evaluator calls"
+        );
+        assert!(!result.response.contains("<goal_status>"));
+        assert!(
+            result
+                .response
+                .contains("I actually sent the email this time")
+        );
+
+        // Turn 2's prompt (the 3rd chat_completion call, 0-indexed 2) must
+        // carry the evaluator's rejection reason forward.
+        let turn2_messages = mock.messages_at(2).unwrap();
+        let turn2_prompt = turn2_messages
+            .last()
+            .expect("turn 2 call must have at least one message");
+        assert!(
+            turn2_prompt
+                .content
+                .contains("doesn't demonstrate the email was actually sent"),
+            "expected the evaluator's reason in turn 2's prompt, got: {:#?}",
+            turn2_prompt
+        );
+        assert!(
+            turn2_prompt.content.contains("if the evaluator is wrong"),
+            "expected the standard reject-and-continue framing, got: {:#?}",
+            turn2_prompt
+        );
+    }
+
+    /// Refactor plan 1.4: an evaluator response with no parseable
+    /// `<verdict>` tag (garbage/off-format output, or a backend error) must
+    /// fail open — the model's "done" claim is accepted immediately rather
+    /// than blocking goal completion on an unreliable evaluator.
+    #[tokio::test]
+    async fn test_evaluator_garbage_response_accepts_done_immediately() {
+        let mock = Arc::new(MockLlm::new(vec![
+            // Turn 1: worker claims done.
+            "All done here.\n<goal_status>done</goal_status>".to_string(),
+            // Evaluator: garbage, no <verdict> tag at all.
+            "uh, I'm not sure how to answer that".to_string(),
+        ]));
+        let agent = Agent::new(
+            Box::new(ArcMockLlm(mock.clone())),
+            ToolRegistry::new(),
+            String::new(),
+        );
+        let skill = test_goal_skill();
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel::<AgentNotification>();
+
+        let result = pursue_goal(&agent, &skill, "Do the thing.", 5, "", "", "", progress_tx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            mock.call_count(),
+            2,
+            "expected exactly 1 work turn + 1 evaluator call; a garbage verdict must not \
+             trigger another work turn"
+        );
+        assert!(!result.response.contains("<goal_status>"));
+        assert!(result.response.contains("All done here"));
     }
 }
