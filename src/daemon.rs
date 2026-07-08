@@ -244,8 +244,7 @@ async fn run_with_wakeup_tick(
 
             let persistent_context = format!("{}{}", memory_context, interaction_context);
 
-            // Sync: load identity and user profile (re-read each time so edits take effect)
-            let identity = config::load_identity();
+            // Sync: load user profile (re-read each time so edits take effect)
             let user_profile = config::load_user();
 
             // Conversation continuity: only freeform messages from an owner
@@ -289,7 +288,6 @@ async fn run_with_wakeup_tick(
             // Async: run agent
             let progress_tx = queued.progress_tx.clone();
             let prompt_ctx = PromptContext {
-                identity: &identity,
                 user_profile: &user_profile,
                 persistent_context: &persistent_context,
             };
@@ -991,7 +989,6 @@ mod tests {
         AppConfig {
             user: UserConfig {
                 timezone: "UTC".to_string(),
-                zip_code: None,
                 emails: vec![],
             },
             llm: LlmConfig {
@@ -1294,7 +1291,6 @@ mod tests {
             "Send the owner a confirmation email.",
             5,
             PromptContext {
-                identity: "",
                 user_profile: "",
                 persistent_context: "",
             },
@@ -1361,7 +1357,6 @@ mod tests {
             "Do the thing.",
             5,
             PromptContext {
-                identity: "",
                 user_profile: "",
                 persistent_context: "",
             },

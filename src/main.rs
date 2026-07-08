@@ -143,7 +143,6 @@ async fn main() -> Result<()> {
         }
         Commands::TestAgent { prompt, skill } => {
             let soul = config::load_soul()?;
-            let identity = config::load_identity();
             let user_profile = config::load_user();
             let (agent, _db_path, skills_dir) = build_agent(&config, soul)?;
 
@@ -175,7 +174,6 @@ async fn main() -> Result<()> {
                     &prompt,
                     &[],
                     agent::PromptContext {
-                        identity: &identity,
                         user_profile: &user_profile,
                         persistent_context: "",
                     },
@@ -447,7 +445,6 @@ fn build_agent(
             config.llm.clone(),
             config.clone(),
             soul.clone(),
-            config::load_identity(),
             config::load_user(),
             skills_dir.clone(),
             db_path.clone(),

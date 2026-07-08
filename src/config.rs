@@ -46,7 +46,6 @@ pub struct CamoufoxConfig {
 pub struct UserConfig {
     #[serde(default = "default_timezone")]
     pub timezone: String,
-    pub zip_code: Option<String>,
     /// The owner's email address(es), used to resolve the per-counterparty
     /// message thread (storage.rs) for inbound/outbound email: mail to/from
     /// one of these addresses lands in the shared "owner" thread rather than
@@ -245,6 +244,8 @@ pub fn load_config() -> Result<AppConfig> {
     })?;
     let mut config: AppConfig = toml::from_str(&content)
         .with_context(|| format!("Failed to parse config: {}", path.display()))?;
+    warn_unknown_keys(&content);
+    warn_config_footguns(&config);
     if let Ok(value) = std::env::var("OPENFERRIS_LLM_TEMPERATURE") {
         config.llm.temperature = value.parse().with_context(|| {
             format!("Failed to parse OPENFERRIS_LLM_TEMPERATURE={value:?} as f32")
@@ -258,6 +259,63 @@ pub fn load_config() -> Result<AppConfig> {
     Ok(config)
 }
 
+/// Top-level config tables/keys the typed `AppConfig` knows about. Kept in
+/// sync with `AppConfig`'s fields; used by `warn_unknown_keys` to catch typos
+/// (like the README's old `listen` key) without the hard-fail forward-compat
+/// cost of `deny_unknown_fields`.
+const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "user",
+    "llm",
+    "daemon",
+    "files",
+    "fetch",
+    "gws",
+    "search",
+    "firecrawl",
+    "camoufox",
+    "telegram",
+    "gmail",
+];
+
+/// Warn about top-level config keys the typed struct will silently ignore.
+/// Shallow by design: only the top level is checked.
+fn warn_unknown_keys(content: &str) {
+    // The typed parse already succeeded by the time this runs, so a raw-parse
+    // failure here can't really happen; bail quietly if it somehow does.
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return;
+    };
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for key in table.keys() {
+        if !KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()) {
+            tracing::warn!(
+                "Unknown key '{}' in config.toml — it is ignored (typo?)",
+                key
+            );
+        }
+    }
+}
+
+/// Warn about configurations that parse fine but are probably not what the
+/// user wants.
+fn warn_config_footguns(config: &AppConfig) {
+    if let Some(tg) = &config.telegram
+        && tg.allowed_users.is_empty()
+    {
+        tracing::warn!(
+            "[telegram] is configured with empty allowed_users — anyone can message the bot"
+        );
+    }
+    if config.gmail.is_some() && config.user.emails.is_empty() {
+        tracing::warn!(
+            "[gmail] is configured but [user] emails is empty — the owner's email address \
+             won't resolve to the owner thread"
+        );
+    }
+}
+
 /// Load user profile from ~/.local/share/openferris/USER.md, falling back to bundled default.
 pub fn load_user() -> String {
     let user_file = data_dir().join("USER.md");
@@ -265,16 +323,6 @@ pub fn load_user() -> String {
         std::fs::read_to_string(&user_file).unwrap_or_default()
     } else {
         include_str!("../USER.md").to_string()
-    }
-}
-
-/// Load identity from ~/.local/share/openferris/IDENTITY.md, falling back to bundled default.
-pub fn load_identity() -> String {
-    let user_identity = data_dir().join("IDENTITY.md");
-    if user_identity.exists() {
-        std::fs::read_to_string(&user_identity).unwrap_or_default()
-    } else {
-        include_str!("../IDENTITY.md").to_string()
     }
 }
 

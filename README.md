@@ -1,6 +1,6 @@
 # OpenFerris
 
-A reliable AI personal assistant that runs on Linux. Built with Unix philosophy: simple components, composed together, scheduled with cron.
+A reliable AI personal assistant that runs on Linux. Built with Unix philosophy: simple components, composed together, scheduled with cron. The guiding principle is reliability over features — do specific things, on time, every time, using markdown files, SQLite, and crontab entries instead of orchestration frameworks.
 
 OpenFerris uses a central daemon that owns the LLM session. Everything else — CLI commands, cron jobs, the TUI, the Telegram bot, the Gmail listener — are thin clients that send requests to the daemon over a Unix domain socket.
 
@@ -193,6 +193,8 @@ For quick manual testing without systemd, `run.sh` at the repo root builds and r
 
 The daemon is the only process that talks to the LLM. All clients connect to it over a **Unix domain socket** (not TCP), send a JSON-line request, and receive one or more JSON-line responses (progress notifications, then a final result).
 
+The Telegram and Gmail listeners are deliberately separate processes: each one bridges exactly one channel, so adding a new channel means writing a new listener, not modifying the core.
+
 The socket path is `$XDG_RUNTIME_DIR/openferris.sock` by default (falls back to `~/.local/share/openferris/openferris.sock` if `$XDG_RUNTIME_DIR` is unset — e.g. under cron). Override it with `[daemon].socket` in config. The daemon also writes the socket path it actually bound to `~/.local/share/openferris/daemon.socket.path`; clients that can't reach the configured/default path (notably cron, which lacks `$XDG_RUNTIME_DIR`) fall back to reading that file. The socket file itself is created mode `0600`.
 
 ## How memory and autonomy work
@@ -213,20 +215,21 @@ Because a model can talk itself into believing it finished something it didn't, 
 
 The agent's system prompt is assembled fresh on every request, in this order:
 
-1. **SOUL** (`~/.config/openferris/SOUL.md`) — the agent's core personality. Loaded once at daemon startup. Falls back to the bundled default if the file doesn't exist.
-2. **IDENTITY** (`~/.local/share/openferris/IDENTITY.md`) — who the agent is (name, self-concept). Re-read on every request, so edits take effect without a restart. Falls back to the bundled default.
-3. **USER** (`~/.local/share/openferris/USER.md`) — facts about you. Also re-read on every request. Falls back to the bundled default.
-4. **Persistent context** — long-term memories (`~/.local/share/openferris/MEMORIES.md`, saved via `<memory>` tags or `/remember` in the TUI) plus a recent-interactions annex from SQLite, both read fresh on every request.
-5. **Skill prompt** — the active skill's `SKILL.md` body.
-6. **Tool descriptions** — filtered by the skill's `tools:` allowlist.
+1. **SOUL** (`~/.config/openferris/SOUL.md`) — the agent's personality and identity (name, self-concept, style). Loaded once at daemon startup. Falls back to the bundled default if the file doesn't exist.
+2. **USER** (`~/.local/share/openferris/USER.md`) — facts about you. Re-read on every request, so edits take effect without a restart. Falls back to the bundled default.
+3. **Persistent context** — long-term memories (`~/.local/share/openferris/MEMORIES.md`, saved via `<memory>` tags or `/remember` in the TUI) plus a recent-interactions annex from SQLite, both read fresh on every request.
+4. **Skill prompt** — the active skill's `SKILL.md` body.
+5. **Tool descriptions** — filtered by the skill's `tools:` allowlist.
 
-Note that SOUL lives under the **config** directory (`~/.config/openferris/`) while IDENTITY and USER live under the **data** directory (`~/.local/share/openferris/`) — different override locations for historical reasons. On top of all this, a freeform message also gets the resolved counterparty's message thread (see above) as conversation history.
+Note that SOUL lives under the **config** directory (`~/.config/openferris/`) while USER lives under the **data** directory (`~/.local/share/openferris/`). On top of all this, a freeform message also gets the resolved counterparty's message thread (see above) as conversation history.
 
 ## Skills
 
 Skills are markdown files that tell the agent what to do. They follow a `SKILL.md` format with YAML frontmatter (name, description, a `tools:` allowlist) and a markdown prompt body. Full format details, examples, and the goal-file spec are in [`skills/README.md`](skills/README.md).
 
 **Bundled skills:** `default` (freeform conversation), `daily-briefing`, `email-reply`, `goal-pursuit`, `goal-runner`.
+
+There is no global output router: a skill that needs to deliver its result calls a delivery tool (`send_telegram`, `send_email`) explicitly as part of its instructions.
 
 The `tools` field is a **focus mechanism, not a security boundary** — since the agent can create its own skills in the workspace, it can give itself access to any registered tool. The real security boundary is the tool registry: only tools compiled into the binary exist at all, and destructive operations within those tools (file writes outside allowed directories, `gws` deletes, unauthorized email recipients) are enforced by the tools themselves regardless of which skill invokes them.
 
@@ -254,7 +257,7 @@ Skill lookup order:
 
 ## Tools
 
-Tools are capabilities the agent can invoke. Each tool is a Rust module with a name, an LLM-facing description, and an `execute` function; the skill's `tools:` list decides which ones are visible for a given run. Some are always registered, some only when their config section is present.
+Tools are capabilities the agent can invoke. Each tool is a Rust module with a name, an LLM-facing description, and an `execute` function; the skill's `tools:` list decides which ones are visible for a given run. Some are always registered, some only when their config section is present. Invocation uses structured `<tool_call>` markers parsed out of ordinary completions rather than a native function-calling API — a format chosen to be reliably producible by local models.
 
 **Always registered:**
 
@@ -305,7 +308,6 @@ allowed_directories = ["~/notes", "~/documents"]
 
 [user]
 timezone = "America/New_York"    # IANA timezone for datetime, set_wakeup, etc.
-zip_code = "10001"                # Currently unused (reserved for a future weather tool)
 emails = ["me@example.com"]       # Optional: your address(es), used to route inbound/outbound
                                    # email into the shared "owner" thread instead of a per-address one
 

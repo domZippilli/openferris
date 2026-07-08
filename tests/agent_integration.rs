@@ -5,11 +5,10 @@ use openferris::skills::Skill;
 use openferris::tools::ToolRegistry;
 use openferris::tools::datetime::DateTimeTool;
 
-/// An empty `PromptContext` for tests that don't care about identity/user
-/// profile/persistent-context content.
+/// An empty `PromptContext` for tests that don't care about user-profile or
+/// persistent-context content.
 fn empty_prompt_ctx() -> PromptContext<'static> {
     PromptContext {
-        identity: "",
         user_profile: "",
         persistent_context: "",
     }

@@ -28,15 +28,14 @@ pub struct AgentResult {
     pub memories: Vec<String>,
 }
 
-/// The three system-prompt-layer strings that flow unchanged through
+/// The system-prompt-layer strings that flow unchanged through
 /// `Agent::run` (and, in `daemon.rs`, through `process_request`/
-/// `pursue_goal` on the way there): the identity and user-profile documents,
-/// and the pre-built persistent-context annex (memories + recent
-/// interactions). Bundled into one struct so those functions stay under
-/// clippy's argument-count limit.
+/// `pursue_goal` on the way there): the user-profile document and the
+/// pre-built persistent-context annex (memories + recent interactions).
+/// Bundled into one struct so those functions stay under clippy's
+/// argument-count limit.
 #[derive(Clone, Copy)]
 pub struct PromptContext<'a> {
-    pub identity: &'a str,
     pub user_profile: &'a str,
     pub persistent_context: &'a str,
 }
@@ -84,12 +83,8 @@ impl Agent {
         // Reset any per-run state held by tools (e.g. ask_claude session id).
         self.tools.notify_run_start();
 
-        let system_prompt = self.build_system_prompt(
-            skill,
-            prompt.identity,
-            prompt.user_profile,
-            prompt.persistent_context,
-        );
+        let system_prompt =
+            self.build_system_prompt(skill, prompt.user_profile, prompt.persistent_context);
 
         let mut messages = vec![ChatMessage {
             role: Role::System,
@@ -389,7 +384,6 @@ impl Agent {
     fn build_system_prompt(
         &self,
         skill: &Skill,
-        identity: &str,
         user_profile: &str,
         persistent_context: &str,
     ) -> String {
@@ -397,15 +391,9 @@ impl Agent {
 
         let mut prompt = String::new();
 
-        // SOUL
+        // SOUL (personality + identity)
         prompt.push_str(&self.soul);
         prompt.push_str("\n\n");
-
-        // IDENTITY
-        if !identity.is_empty() {
-            prompt.push_str(identity);
-            prompt.push_str("\n\n");
-        }
 
         // USER
         if !user_profile.is_empty() {
