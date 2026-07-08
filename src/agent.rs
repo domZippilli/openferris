@@ -16,7 +16,8 @@ const COMPACTION_THRESHOLD: f32 = 0.90;
 /// summary replaces everything older than this.
 const KEEP_RECENT_PAIRS: usize = 3;
 /// A run can compact at most this many times. Past that, something is wrong
-/// (runaway tool output, infinite loop) and bailing is safer than masking it.
+/// (runaway tool output, infinite loop) and bailing is safer than masking it:
+/// `run` returns an error instead of sending an over-budget request.
 const MAX_COMPACTIONS: usize = 3;
 
 #[derive(Clone, Debug)]
@@ -95,26 +96,41 @@ impl Agent {
         for iteration in 0..MAX_ITERATIONS {
             tracing::debug!("Agent iteration {}", iteration + 1);
 
-            // Compact before each LLM call if we've exceeded budget.
-            if compactions_done < MAX_COMPACTIONS && estimate_tokens(&messages) > budget {
-                let before = estimate_tokens(&messages);
-                match self.compact(&messages).await {
-                    Ok(new_messages) => {
-                        let after = estimate_tokens(&new_messages);
-                        tracing::info!(
-                            "Compacted context: {} -> {} tokens (compaction {}/{})",
-                            before,
-                            after,
-                            compactions_done + 1,
-                            MAX_COMPACTIONS
-                        );
-                        messages = new_messages;
-                        compactions_done += 1;
+            // Compact before each LLM call if we've exceeded budget. If
+            // compactions are exhausted and we're still over budget, bail
+            // rather than silently sending an over-budget request — see the
+            // MAX_COMPACTIONS doc comment for why that's the safer failure
+            // mode (runaway tool output / infinite loop, not something to
+            // paper over by hoping the backend truncates gracefully).
+            if estimate_tokens(&messages) > budget {
+                if compactions_done < MAX_COMPACTIONS {
+                    let before = estimate_tokens(&messages);
+                    match self.compact(&messages).await {
+                        Ok(new_messages) => {
+                            let after = estimate_tokens(&new_messages);
+                            tracing::info!(
+                                "Compacted context: {} -> {} tokens (compaction {}/{})",
+                                before,
+                                after,
+                                compactions_done + 1,
+                                MAX_COMPACTIONS
+                            );
+                            messages = new_messages;
+                            compactions_done += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!("Compaction failed: {}", e);
+                            return Err(e);
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("Compaction failed: {}", e);
-                        return Err(e);
-                    }
+                } else {
+                    let estimated = estimate_tokens(&messages);
+                    anyhow::bail!(
+                        "Context still over budget after {} compaction(s) (estimated {} tokens > budget {} tokens); refusing to send an over-budget request to the LLM",
+                        MAX_COMPACTIONS,
+                        estimated,
+                        budget
+                    );
                 }
             }
 
@@ -590,6 +606,16 @@ fn parse_tool_calls(text: &str) -> ParseOutcome {
 
             search_from = after_tag + rel_end + "</tool_call>".len();
         } else {
+            // No closing tag — most likely the response was truncated at
+            // max_tokens mid-call. Report this as a parse error (same
+            // round-trip mechanism as malformed JSON above) instead of
+            // silently breaking: a silent break would make the loop treat
+            // the partial `<tool_call>{"function":...` markup as a final
+            // answer and leak it straight to the user.
+            outcome.errors.push(ParseError {
+                raw: text[after_tag..].to_string(),
+                detail: "unclosed <tool_call> block: no matching </tool_call> found (the response may have been truncated)".to_string(),
+            });
             break;
         }
     }
@@ -597,28 +623,68 @@ fn parse_tool_calls(text: &str) -> ParseOutcome {
     outcome
 }
 
-/// Build a short snippet of the raw text around a serde_json error's column.
-/// Returns the offending region with `>>` markers so the model can see exactly
-/// where it went wrong.
-fn error_snippet(raw: &str, detail: &str) -> String {
-    // Try to pull "column N" from the serde error message.
-    let col = detail
-        .split("column ")
-        .nth(1)
+/// Pull a decimal number following `marker` out of a serde_json error message,
+/// e.g. `extract_after(detail, "column ")` on "... at line 3 column 8" -> 8.
+/// Uses the LAST occurrence of `marker`: serde appends " at line L column C"
+/// to the end of the message, and the message body itself may contain the
+/// marker words (e.g. "newline" contains "line ").
+fn extract_after(detail: &str, marker: &str) -> Option<usize> {
+    detail
+        .rsplit(marker)
+        .next()
+        .filter(|rest| *rest != detail)
         .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
-        .and_then(|n| n.parse::<usize>().ok());
-    match col {
-        Some(c) if c > 0 && c <= raw.len() => {
-            let start = c.saturating_sub(20);
-            let end = (c + 20).min(raw.len());
-            format!(
-                "...{}>>HERE>>{}...",
-                &raw[start..c.saturating_sub(1)],
-                &raw[c.saturating_sub(1)..end]
-            )
+        .and_then(|n| n.parse::<usize>().ok())
+}
+
+/// Convert a serde_json (line, column) — both 1-indexed, with `column` counted
+/// in bytes from the start of `line` — into a 0-indexed byte offset into the
+/// whole (possibly multi-line) `raw` string. This is the piece the old code
+/// was missing: it used the per-line `column` directly as an offset into the
+/// full string, which only happened to work for single-line input.
+fn line_col_to_byte_offset(raw: &str, line: usize, col: usize) -> usize {
+    let mut offset = 0usize;
+    let mut current_line = 1usize;
+    for line_str in raw.split('\n') {
+        if current_line == line {
+            return offset + col.saturating_sub(1).min(line_str.len());
+        }
+        offset += line_str.len() + 1; // +1 for the '\n' the split consumed
+        current_line += 1;
+    }
+    // Requested line is past the end of `raw` (shouldn't happen for a real
+    // serde error against this exact string, but don't panic if it does).
+    raw.len()
+}
+
+/// Snap a byte offset to the nearest char boundary at or before it, so it's
+/// always safe to slice `s` at the returned index.
+fn snap_to_char_boundary(s: &str, idx: usize) -> usize {
+    let mut idx = idx.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Build a short snippet of the raw text around a serde_json error's
+/// location. Returns the offending region with `>>HERE>>` markers so the
+/// model can see exactly where it went wrong.
+fn error_snippet(raw: &str, detail: &str) -> String {
+    // serde_json errors read "... at line L column C". `column` is an offset
+    // within line `L`, not within `raw` as a whole, so both must be pulled
+    // out and combined into a real byte offset before slicing.
+    let line = extract_after(detail, "line ");
+    let col = extract_after(detail, "column ");
+    match (line, col) {
+        (Some(line), Some(col)) if line > 0 && col > 0 => {
+            let offset = snap_to_char_boundary(raw, line_col_to_byte_offset(raw, line, col));
+            let start = snap_to_char_boundary(raw, offset.saturating_sub(20));
+            let end = snap_to_char_boundary(raw, (offset + 20).min(raw.len()));
+            format!("...{}>>HERE>>{}...", &raw[start..offset], &raw[offset..end])
         }
         _ => {
-            let end = raw.len().min(80);
+            let end = snap_to_char_boundary(raw, raw.len().min(80));
             format!("{}{}", &raw[..end], if raw.len() > 80 { "..." } else { "" })
         }
     }
@@ -733,6 +799,31 @@ mod tests {
     }
 
     #[test]
+    fn test_unclosed_tool_call_reported_as_parse_error() {
+        // Simulates a response truncated at max_tokens mid-call: an opening
+        // `<tool_call>` with no matching `</tool_call>` anywhere after it.
+        let text = r#"Let me check the time.
+
+<tool_call>
+{"function": "datetime", "parameters": {}}"#;
+        let outcome = parse_tool_calls(text);
+        assert!(
+            outcome.calls.is_empty(),
+            "an unclosed tool_call must never produce a call"
+        );
+        assert_eq!(
+            outcome.errors.len(),
+            1,
+            "an unclosed tool_call must be reported as a parse error, not silently dropped"
+        );
+        assert!(
+            outcome.errors[0].detail.contains("unclosed"),
+            "detail was: {}",
+            outcome.errors[0].detail
+        );
+    }
+
+    #[test]
     fn test_strip_invalid_json_escapes() {
         let (out, count) = strip_invalid_json_escapes(r#"<h2\>hi\n</h2>"#);
         assert_eq!(out, r#"<h2>hi\n</h2>"#);
@@ -744,6 +835,61 @@ mod tests {
         let raw = "abcdefghijklmnopqrstuvwxyzABCDEFG";
         let snippet = error_snippet(raw, "something at line 1 column 10 blah");
         assert!(snippet.contains(">>HERE>>"));
+    }
+
+    #[test]
+    fn test_error_snippet_points_at_right_spot_on_multiline_input() {
+        // Real serde_json error (not a synthetic detail string), so `detail`
+        // has genuine line/column numbers. serde reports this one as line 3
+        // column 3 (missing comma before `"b"`, byte offset 2 within that
+        // line). The old code used `column` directly as a byte offset into
+        // the *whole* string (3), which for multi-line input lands the
+        // marker inside line 1 (`{`) instead of line 3 (`"b": 2`).
+        let raw = "{\n  \"a\": 1\n  \"b\": 2\n}";
+        let err = serde_json::from_str::<serde_json::Value>(raw).unwrap_err();
+        assert_eq!(err.line(), 3, "test assumption: error must be on line 3");
+        assert_eq!(err.column(), 3, "test assumption: column 3 within line 3");
+        let detail = err.to_string();
+
+        let snippet = error_snippet(raw, &detail);
+        assert!(snippet.contains(">>HERE>>"), "snippet was: {}", snippet);
+
+        // The marker sits right before the offending `"` that opens `"b"` on
+        // line 3, so the text right after it must be line 3's tail, not
+        // anything from line 1 or 2.
+        assert!(
+            snippet.contains(">>HERE>>\"b\": 2"),
+            "expected the marker directly before line 3's `\"b\": 2`, got: {:?}",
+            snippet
+        );
+        assert!(
+            !snippet.contains("{>>HERE>>") && !snippet.contains("1\n>>HERE>>"),
+            "marker incorrectly landed on an earlier line: {:?}",
+            snippet
+        );
+    }
+
+    #[test]
+    fn test_error_snippet_does_not_panic_on_multibyte_content() {
+        // Surround a single-byte marker character with 3-byte UTF-8 chars
+        // ('€') so that the naive `offset +/- 20` window used for the
+        // snippet lands mid-character on both sides (character boundaries
+        // only fall on multiples of 3 within each run of '€'s, and 20 is not
+        // a multiple of 3). Byte-slicing at those raw offsets would panic;
+        // snapping to a char boundary first must not.
+        let prefix = "€".repeat(15); // 45 bytes, offset of 'X' below == 45
+        let suffix = "€".repeat(15);
+        let raw = format!("{}X{}", prefix, suffix);
+        let detail = "expected value at line 1 column 46"; // col 46 -> byte offset 45 == 'X'
+
+        // Must not panic.
+        let snippet = error_snippet(&raw, detail);
+        assert!(snippet.contains(">>HERE>>"), "snippet was: {}", snippet);
+        assert!(
+            snippet.contains(">>HERE>>X"),
+            "expected the marker directly before the 'X', got: {:?}",
+            snippet
+        );
     }
 
     #[test]

@@ -273,3 +273,60 @@ async fn test_compaction_fires_when_over_budget() {
         "expected the final response after compaction; got something else, suggesting compaction did not fire"
     );
 }
+
+/// When the context is over budget on every check and MAX_COMPACTIONS (3)
+/// compactions aren't enough to fix that, `run` must return an error instead
+/// of silently sending an over-budget request to the LLM.
+///
+/// Strategy: n_ctx is tiny (10 tokens => ~9-token / ~36-char budget), so the
+/// budget check is over-budget from the very first message onward — no need
+/// to engineer huge padding. Walking through `Agent::run`'s loop by hand:
+///   * iteration 0: `messages.len() == 2` (system + user), so `compact()`
+///     short-circuits for free (its own "< 4 messages" guard) — no LLM call.
+///     Then the turn's own LLM call consumes response[0] (a tool call).
+///   * iteration 1: `messages.len() == 4` now, so `compact()` does real work
+///     and consumes response[1] (the summary). Turn's LLM call consumes
+///     response[2] (another tool call).
+///   * iteration 2: same shape — compact() consumes response[3] (summary),
+///     turn's LLM call consumes response[4] (another tool call).
+///   * iteration 3: `compactions_done == MAX_COMPACTIONS (3)` and the context
+///     is still over budget => `run` must bail here, with NO 6th scripted
+///     response needed. If it instead compacted again or, worse, sent the
+///     over-budget request, MockLlm would panic with "no more scripted
+///     responses" once exhausted, or the test would time out waiting for a
+///     final answer that never comes.
+#[tokio::test]
+async fn test_run_errors_when_compactions_exhausted_and_still_over_budget() {
+    let tool_call = || {
+        r#"<tool_call>
+{"function": "datetime", "parameters": {}}
+</tool_call>"#
+            .to_string()
+    };
+
+    let mock = MockLlm::with_n_ctx(
+        vec![
+            tool_call(),        // iteration 0's turn
+            "Summary A".into(), // iteration 1's compaction
+            tool_call(),        // iteration 1's turn
+            "Summary B".into(), // iteration 2's compaction
+            tool_call(),        // iteration 2's turn
+                                // iteration 3 must bail before consuming a 6th response
+        ],
+        10, // n_ctx tokens; budget = 9 tokens ≈ 36 chars — always exceeded
+    );
+    let agent = Agent::new(Box::new(mock), test_registry(), String::new());
+    let skill = test_skill(&["datetime"]);
+
+    let err = agent
+        .run(&skill, "What time is it?", &[], "", "", "", None)
+        .await
+        .unwrap_err();
+
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("budget") && msg.contains("compaction"),
+        "expected an over-budget/compactions-exhausted error, got: {}",
+        msg
+    );
+}
