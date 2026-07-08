@@ -10,17 +10,24 @@ use crate::storage::Storage;
 /// If `allowed_senders` is empty, all recipients are allowed.
 /// After sending, the `to` recipient is recorded as a known contact.
 ///
-/// `cc` recipients are **caller-vetted**: they are sent verbatim and are
-/// neither authorized against the allowlist/contacts nor recorded as contacts.
-/// The Gmail reply-all path passes only addresses it has already approved
-/// (introduced to the thread by the owner or a whitelisted sender), which may
-/// legitimately include third parties who are not themselves whitelisted.
+/// `cc` is split into two trust tiers:
+/// - `vetted_cc`: addresses the caller has already approved through its own
+///   logic (e.g. config-sourced `always_cc`, or the Gmail reply-all path's
+///   `approved_thread_recipients`, which only admits addresses introduced to
+///   the thread by the owner or a whitelisted sender). These are sent
+///   verbatim and are neither re-authorized against the allowlist/contacts
+///   nor recorded as contacts, since they may legitimately include third
+///   parties who are not themselves whitelisted.
+/// - `unvetted_cc`: addresses supplied directly by a caller that has not
+///   done its own vetting (e.g. a model/tool-call parameter). These are
+///   authorized against the allowlist/known-contacts exactly like `to`.
 pub async fn send_email(
     storage: &Storage,
     allowed_senders: &[String],
     from: Option<&str>,
     to: &str,
-    cc: Option<&str>,
+    vetted_cc: Option<&str>,
+    unvetted_cc: Option<&str>,
     subject: &str,
     body: &str,
     in_reply_to: Option<&str>,
@@ -43,13 +50,19 @@ pub async fn send_email(
                 recipient
             );
         }
+
+        authorize_cc(unvetted_cc, allowed_senders, storage)?;
     }
 
-    // Compose RFC 2822
+    let cc = merge_cc(vetted_cc, normalize_cc(unvetted_cc).as_deref());
+
+    // Compose RFC 2822. The To header uses the parsed, authorized address —
+    // never the raw `to` string, which for "Name <addr>, extra@evil" would
+    // smuggle an unauthorized recipient past the single-address check above.
     let raw = compose_raw(
         from,
-        to,
-        cc,
+        &recipient,
+        cc.as_deref(),
         subject,
         body,
         in_reply_to,
@@ -77,11 +90,14 @@ pub async fn send_email(
 
 /// Non-async version for use in tool contexts where Storage isn't Send.
 /// Opens its own DB connection, checks contacts, sends, records contact.
+///
+/// See [`send_email`] for the `vetted_cc`/`unvetted_cc` trust split.
 pub async fn send_email_with_db(
     db_path: &std::path::Path,
     allowed_senders: &[String],
     to: &str,
-    cc: Option<&str>,
+    vetted_cc: Option<&str>,
+    unvetted_cc: Option<&str>,
     subject: &str,
     body: &str,
     content_type: Option<&str>,
@@ -102,9 +118,23 @@ pub async fn send_email_with_db(
                 recipient
             );
         }
+
+        authorize_cc(unvetted_cc, allowed_senders, &storage)?;
     }
 
-    let raw = compose_raw(None, to, cc, subject, body, None, None, content_type);
+    let cc = merge_cc(vetted_cc, normalize_cc(unvetted_cc).as_deref());
+
+    // See send_email: the To header must use the parsed, authorized address.
+    let raw = compose_raw(
+        None,
+        &recipient,
+        cc.as_deref(),
+        subject,
+        body,
+        None,
+        None,
+        content_type,
+    );
     let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
     let send_body = serde_json::json!({ "raw": encoded });
 
@@ -119,6 +149,83 @@ pub async fn send_email_with_db(
     Ok(())
 }
 
+/// Authorize every address in a comma-separated `cc` list (model/tool-call
+/// supplied, i.e. not otherwise vetted by the caller) against the allowed
+/// senders config list or the known_contacts table, mirroring the `to` check.
+/// Assumes `allowed_senders` is non-empty (callers only invoke this inside
+/// that guard, matching the `to` authorization).
+fn authorize_cc(cc: Option<&str>, allowed_senders: &[String], storage: &Storage) -> Result<()> {
+    let Some(cc) = cc else {
+        return Ok(());
+    };
+
+    for addr in cc.split(',') {
+        let addr = addr.trim();
+        if addr.is_empty() {
+            continue;
+        }
+
+        let recipient = parse_email_address(addr);
+        let in_allowlist = allowed_senders
+            .iter()
+            .any(|s| s.to_lowercase() == recipient);
+        let is_known = storage.is_contact(&recipient)?;
+
+        if !in_allowlist && !is_known {
+            bail!(
+                "Cc recipient '{}' is not in the allowed senders list or known contacts",
+                recipient
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Reduce an unvetted, comma-separated cc list to the bare parsed addresses
+/// (the same form `authorize_cc` checked), so display-name markup in the raw
+/// input can't carry anything past authorization into the Cc header.
+fn normalize_cc(cc: Option<&str>) -> Option<String> {
+    let addrs: Vec<String> = cc?
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(parse_email_address)
+        .collect();
+
+    if addrs.is_empty() {
+        None
+    } else {
+        Some(addrs.join(", "))
+    }
+}
+
+/// Merge a caller-vetted cc list with an unvetted (but now authorized) cc
+/// list into a single comma-separated string for `compose_raw`.
+fn merge_cc(vetted_cc: Option<&str>, unvetted_cc: Option<&str>) -> Option<String> {
+    let parts: Vec<&str> = [unvetted_cc, vetted_cc]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+/// Sanitize a single header value against CRLF/header injection by
+/// collapsing embedded `\r`, `\n`, and `\r\n` sequences to a single space.
+/// Reply subjects and In-Reply-To/References values derive from inbound
+/// (attacker-controlled) email headers, so this must run on every value
+/// interpolated into a raw header line.
+fn sanitize_header_value(value: &str) -> String {
+    value.replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
+
 fn compose_raw(
     from: Option<&str>,
     to: &str,
@@ -131,30 +238,34 @@ fn compose_raw(
 ) -> String {
     let mut msg = String::new();
     if let Some(from) = from {
-        msg.push_str(&format!("From: {}\r\n", from));
+        msg.push_str(&format!("From: {}\r\n", sanitize_header_value(from)));
     }
-    msg.push_str(&format!("To: {}\r\n", to));
+    msg.push_str(&format!("To: {}\r\n", sanitize_header_value(to)));
     if let Some(cc) = cc {
         if !cc.is_empty() {
-            msg.push_str(&format!("Cc: {}\r\n", cc));
+            msg.push_str(&format!("Cc: {}\r\n", sanitize_header_value(cc)));
         }
     }
-    msg.push_str(&format!("Subject: {}\r\n", subject));
+    msg.push_str(&format!("Subject: {}\r\n", sanitize_header_value(subject)));
 
     if let Some(irt) = in_reply_to {
         if !irt.is_empty() {
+            let irt = sanitize_header_value(irt);
             msg.push_str(&format!("In-Reply-To: {}\r\n", irt));
 
             let refs = match references {
-                Some(r) if !r.is_empty() => format!("{} {}", r, irt),
-                _ => irt.to_string(),
+                Some(r) if !r.is_empty() => format!("{} {}", sanitize_header_value(r), irt),
+                _ => irt.clone(),
             };
             msg.push_str(&format!("References: {}\r\n", refs));
         }
     }
 
     let ct = content_type.unwrap_or("text/plain");
-    msg.push_str(&format!("Content-Type: {}; charset=\"utf-8\"\r\n", ct));
+    msg.push_str(&format!(
+        "Content-Type: {}; charset=\"utf-8\"\r\n",
+        sanitize_header_value(ct)
+    ));
     msg.push_str("MIME-Version: 1.0\r\n");
     msg.push_str("\r\n");
     msg.push_str(body);
@@ -300,5 +411,79 @@ mod tests {
             parse_email_address("plain@example.com"),
             "plain@example.com"
         );
+        // Recipient smuggling: only the angle-bracket address survives
+        // parsing, and compose gets this parsed form — the trailing extra
+        // address never reaches the To header.
+        assert_eq!(
+            parse_email_address("Boss <boss@example.com>, evil@example.com"),
+            "boss@example.com"
+        );
+    }
+
+    #[test]
+    fn test_normalize_cc_strips_display_name_markup() {
+        assert_eq!(
+            normalize_cc(Some("Pal <pal@example.com>, plain@example.com")).as_deref(),
+            Some("pal@example.com, plain@example.com")
+        );
+        assert_eq!(normalize_cc(Some("  ,  ")), None);
+        assert_eq!(normalize_cc(None), None);
+    }
+
+    #[test]
+    fn test_authorize_cc_rejects_unallowed_allows_allowed() {
+        let storage = Storage::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let allowed_senders = vec!["boss@example.com".to_string()];
+
+        // Not in the allowlist and not a known contact -> rejected.
+        let err =
+            authorize_cc(Some("attacker@example.com"), &allowed_senders, &storage).unwrap_err();
+        assert!(err.to_string().contains("attacker@example.com"));
+
+        // In the config allowlist -> passes.
+        assert!(authorize_cc(Some("boss@example.com"), &allowed_senders, &storage).is_ok());
+
+        // A known contact (not in the config allowlist) -> also passes.
+        storage.add_contact("friend@example.com").unwrap();
+        assert!(authorize_cc(Some("friend@example.com"), &allowed_senders, &storage).is_ok());
+
+        // Mixed list: one allowed, one not -> rejected as a whole.
+        let err = authorize_cc(
+            Some("boss@example.com, attacker@example.com"),
+            &allowed_senders,
+            &storage,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("attacker@example.com"));
+    }
+
+    #[test]
+    fn test_compose_raw_sanitizes_crlf_header_injection() {
+        let raw = compose_raw(
+            None,
+            "them@example.com",
+            None,
+            "evil\r\nBcc: attacker@example.com",
+            "Hi!",
+            None,
+            None,
+            None,
+        );
+
+        // No new header line should have been injected into the header
+        // section (everything before the blank line separating headers from
+        // the body).
+        let (headers, _) = raw.split_once("\r\n\r\n").expect("header/body split");
+        for line in headers.split("\r\n") {
+            assert!(
+                !line.to_lowercase().starts_with("bcc:"),
+                "injected header line found: {line:?}"
+            );
+        }
+
+        // The CRLF was collapsed into the Subject value rather than starting
+        // a new header.
+        assert!(raw.contains("Subject: evil Bcc: attacker@example.com\r\n"));
+        assert!(!raw.contains("\r\nBcc:"));
     }
 }

@@ -416,6 +416,7 @@ async fn process_message(
         Some(our_email),
         &from,
         cc.as_deref(),
+        None,
         &reply_subject,
         &response,
         Some(&message_id_header),

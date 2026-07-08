@@ -29,7 +29,7 @@ impl Tool for SendEmailTool {
     fn description_for_llm(&self) -> &str {
         "Send an email via Gmail. \
          Parameters: {\"to\": \"<email address>\", \"subject\": \"<subject line>\", \"body\": \"<email body text>\", \"cc\": \"<optional cc address>\", \"content_type\": \"<optional: text/plain or text/html>\"}. \
-         The recipient must be in the allowed contacts list or someone you have previously emailed. \
+         The recipient (and any cc address you supply) must be in the allowed contacts list or someone you have previously emailed. \
          Use this for sending notifications, briefings, or replies to known contacts. \
          Set content_type to text/html when sending HTML-formatted emails."
     }
@@ -53,19 +53,16 @@ impl Tool for SendEmailTool {
         let param_cc = params.get("cc").and_then(|v| v.as_str());
         let content_type = params.get("content_type").and_then(|v| v.as_str());
 
-        // Merge param cc with always_cc config
-        let cc = match (param_cc, &self.always_cc) {
-            (Some(p), Some(a)) => Some(format!("{}, {}", p, a)),
-            (Some(p), None) => Some(p.to_string()),
-            (None, Some(a)) => Some(a.clone()),
-            (None, None) => None,
-        };
-
+        // `param_cc` is model-supplied and must be authorized against the
+        // allowlist/known-contacts just like `to`. `always_cc` is
+        // config-sourced (the user configured it deliberately) and is
+        // exempt from that check.
         crate::email::send_email_with_db(
             &self.db_path,
             &self.allowed_senders,
             to,
-            cc.as_deref(),
+            self.always_cc.as_deref(),
+            param_cc,
             subject,
             body,
             content_type,
