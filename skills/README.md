@@ -45,6 +45,7 @@ skill is invoked. Be specific about what you want the agent to do.
 - `scrape_url` — Scrape a web page via Firecrawl and return clean LLM-ready markdown. Params: `{"url": "..."}`. Handles JavaScript-rendered pages, removes nav/chrome/ads (truncated at 50KB). Use for general web pages where you want article content; for simple/known endpoints (RSS, JSON APIs, your wiki) use fetch_url instead — it's faster.
 - `stealth_fetch` — Fetch a web page through Camoufox (stealth Firefox with anti-fingerprinting) and return clean markdown. Params: `{"url": "...", "wait_ms": <optional int, 0-15000>}`. Use only when fetch_url and scrape_url are blocked, rate-limited, or returning bot-detection pages; slow (~2-10s per call) and resource-heavy, so reach for it last in the fetch_url -> scrape_url -> stealth_fetch ladder.
 - `schedule` — Manage cron-based skill schedules. Params: `{"action": "add|remove|list", "skill_name": "...", "cron_expr": "..."}`
+- `set_wakeup` — Schedule a one-shot wakeup: at the given time (within about a minute), a fresh agent run fires with your note as its only instruction. Params: `{"action": "add", "due": "YYYY-MM-DD HH:MM", "note": "..."}` (self-contained instruction; `due` is in the user's configured timezone and must be in the future), `{"action": "list"}`, or `{"action": "cancel", "id": <number>}`. Use for a precise-time or non-recurring follow-up ("remind me at 9"); use `schedule` for recurring cadences and the goal file's `next_check` for per-goal pacing.
 - `send_telegram` — Send a message via Telegram. Params: `{"message": "...", "chat_id": <optional>}`
 - `send_email` — Send an email via Gmail. Params: `{"to": "...", "subject": "...", "body": "..."}`. Recipient must be in allowed contacts or a known contact.
 - `gws` — Run a Google Workspace CLI command. Params: `{"command": "..."}`. Destructive operations (delete, trash, send, empty, remove) are blocked by default. If `[gws].allow_drive_file_deletes = true`, `drive files delete` and `drive files trash` are allowed. Use send_email to send emails.
@@ -155,3 +156,5 @@ openferris schedule add goal-runner "0 */2 * * *"
 ```
 
 (every 2 hours; adjust the cron expression to taste). This is what makes "I'll check back tomorrow" a real mechanism instead of an empty promise.
+
+`next_check` and `set_wakeup` solve related but distinct problems: `next_check` is coarse, heartbeat-driven pacing for a specific goal file, checked whenever goal-runner's cron next fires; `set_wakeup` is a precise, one-shot deferred action (any skill can call it, not just goal pursuit) that fires its own fresh agent run within about a minute of the requested time, independent of any goal file.

@@ -11,6 +11,7 @@ tools:
   - web_search
   - scrape_url
   - stealth_fetch
+  - set_wakeup
   - send_telegram
   - send_email
   - gws
@@ -69,6 +70,8 @@ Send a Telegram message or email (`send_telegram`/`send_email`) when there's som
 ## Scheduling
 
 Do not call the `schedule` tool for this goal -- it's not in your allowlist, and cron entries are not how per-goal timing works here. Set `next_check` in the goal file instead; that's what defers the work.
+
+`next_check` is coarse -- goal-runner only wakes up on its own cron cadence, so treat it as "sometime after this time," not a precise appointment. If part of this goal needs a precise time or a one-shot follow-up that isn't really about the goal file (e.g. a specific reply you told someone to expect by 5pm today), use `set_wakeup` for that piece instead.
 
 ## Status marker
 

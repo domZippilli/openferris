@@ -1,4 +1,6 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -38,6 +40,14 @@ const DEFAULT_HISTORY_TOKEN_BUDGET: usize = 50_000;
 const GOAL_SKILL_NAME: &str = "goal-pursuit";
 const GOAL_MAX_TURNS_HARD: usize = 25;
 
+/// How often the daemon polls for due wakeups (see `set_wakeup`/1.3 in the
+/// refactor plan). ~a minute matches the tool's "fires within about a
+/// minute of `due`" promise to the LLM without polling SQLite too eagerly.
+const WAKEUP_TICK_INTERVAL: Duration = Duration::from_secs(60);
+/// Source tag for a `DaemonRequest` the wakeup tick enqueues itself, as
+/// opposed to one that arrived from a client connection.
+const WAKEUP_SOURCE: &str = "wakeup";
+
 /// Resolve the DB-thread counterparty for a `FreeformMessage`'s session_id.
 ///
 /// TUI sessions (`tui:<uuid>`) and anything else not recognized below are
@@ -72,11 +82,41 @@ struct LogData {
     result: AgentResult,
 }
 
+/// Start the daemon. `db_path` is the same SQLite file `storage` was opened
+/// from — the wakeup tick task (see [`WAKEUP_TICK_INTERVAL`]) needs its own
+/// `Connection` (the worker task above owns `storage` for the request path),
+/// so it reopens the file rather than sharing a handle. `Storage::open` sets
+/// WAL + a 5s `busy_timeout`, so the extra connection can write concurrently
+/// with the worker's without `SQLITE_BUSY`.
 pub async fn run(
     config: AppConfig,
     agent: Agent,
     storage: Storage,
     memories: Memories,
+    db_path: PathBuf,
+) -> Result<()> {
+    run_with_wakeup_tick(
+        config,
+        agent,
+        storage,
+        memories,
+        db_path,
+        WAKEUP_TICK_INTERVAL,
+    )
+    .await
+}
+
+/// Same as [`run`], but with the wakeup tick's polling interval as a
+/// parameter — production always uses [`WAKEUP_TICK_INTERVAL`] (`run` above
+/// hardcodes it), but the integration test below needs a much shorter
+/// interval to fire a seeded wakeup without a real-time wait.
+async fn run_with_wakeup_tick(
+    config: AppConfig,
+    agent: Agent,
+    storage: Storage,
+    memories: Memories,
+    db_path: PathBuf,
+    wakeup_tick_interval: Duration,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     // Owned (not borrowed from `config`) so `config` can move wholesale into
@@ -108,6 +148,28 @@ pub async fn run(
     tracing::info!("OpenFerris daemon listening on {}", socket_path);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<QueuedRequest>();
+
+    // Wakeup tick: polls for due `set_wakeup` entries and enqueues each as an
+    // internal RunSkill request through the same worker channel a client
+    // request would use, so it gets identical handling — including the
+    // owner-thread run_note persistence RunSkill already does (see the
+    // `ResponseKind::Done` match arm below). This is the one-shot deferred-
+    // action primitive from refactor plan 1.3: the goal heartbeat (1.2)
+    // already covers coarse per-goal resumption, this covers precise-time
+    // and non-goal follow-ups ("remind me at 9").
+    {
+        let tick_tx = tx.clone();
+        let wakeup_db_path = db_path.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(wakeup_tick_interval);
+            loop {
+                interval.tick().await;
+                if let Err(e) = fire_due_wakeups(&wakeup_db_path, &tick_tx).await {
+                    tracing::warn!("Wakeup tick failed: {}", e);
+                }
+            }
+        });
+    }
 
     // Single worker task — processes requests sequentially, owns storage and memories.
     let worker_agent = agent.clone();
@@ -418,6 +480,89 @@ pub async fn run(
             }
         });
     }
+}
+
+/// Poll `db_path` for pending wakeups whose `due_ts` has passed and enqueue
+/// each as a `RunSkill` request on `tx`, exactly as if a client had asked to
+/// run the `default` skill with the wakeup's note as context. Reused by the
+/// production tick loop in [`run_with_wakeup_tick`] and directly by the
+/// integration test below.
+///
+/// Marks each wakeup `fired` *before* enqueuing its run — at-most-once
+/// delivery. If the process crashes between the mark and the run actually
+/// executing, the wakeup is silently lost rather than risking a double-fire
+/// on the next tick after restart. There's no cheap idempotency key to make
+/// "fire it again" safe here (the "work" is an arbitrary agent run that may
+/// already have sent an email or message), so lost-but-never-duplicated is
+/// the safer failure mode for a personal-assistant reminder.
+async fn fire_due_wakeups(db_path: &Path, tx: &mpsc::UnboundedSender<QueuedRequest>) -> Result<()> {
+    let storage = Storage::open(db_path)?;
+    let now = storage::now_local();
+    let due = storage.due_wakeups(&now)?;
+
+    for (id, due_ts, note) in due {
+        if let Err(e) = storage.mark_wakeup_fired(id) {
+            tracing::warn!(
+                "Failed to mark wakeup {} fired, skipping it this tick: {}",
+                id,
+                e
+            );
+            continue;
+        }
+        tracing::info!("Wakeup #{} fired (was due {})", id, due_ts);
+
+        let request = DaemonRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: RequestKind::RunSkill {
+                skill_name: "default".to_string(),
+                context: Some(wakeup_context(&due_ts, &note)),
+            },
+            source: Some(WAKEUP_SOURCE.to_string()),
+            session_id: None,
+        };
+        let (response_tx, response_rx) = oneshot::channel();
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel::<AgentNotification>();
+        let queued = QueuedRequest {
+            request,
+            response_tx,
+            progress_tx,
+        };
+        if tx.send(queued).is_err() {
+            tracing::error!("Wakeup #{}: worker channel closed, dropping", id);
+            break;
+        }
+        // Don't block the tick loop on the run finishing; just log the
+        // outcome when it does. The worker itself records the final
+        // response as an owner-thread run_note (see the `RequestKind::
+        // RunSkill` arm in the thread-persistence match below) — reusing
+        // that existing path rather than inventing a new one for wakeups.
+        tokio::spawn(async move {
+            match response_rx.await {
+                Ok(resp) => tracing::debug!("Wakeup #{} run finished: {:?}", id, resp.kind),
+                Err(_) => tracing::warn!("Wakeup #{}: worker dropped the response channel", id),
+            }
+        });
+    }
+
+    Ok(())
+}
+
+/// Build the instruction handed to the fresh `default`-skill run a fired
+/// wakeup triggers. That run starts with none of the original conversation —
+/// only this text plus the skill's normal persistent context/system prompt —
+/// so it has to spell out plainly that nobody is waiting on a live chat
+/// reply, since the `default` skill's own prompt otherwise assumes a human
+/// just sent a message.
+fn wakeup_context(due_ts: &str, note: &str) -> String {
+    format!(
+        "This is an automated wakeup you (or a prior run) scheduled earlier via set_wakeup, \
+         originally due {}. Nobody is chatting with you right now — there is no message to \
+         reply to. Act on the note below directly: do the work it describes, and use \
+         send_telegram/send_email yourself if the owner needs to be told something. The note \
+         is the only context you have; nothing else about why it was set is available.\n\n\
+         Wakeup note: {}",
+        due_ts, note
+    )
 }
 
 fn notification_to_response_kind(n: AgentNotification) -> ResponseKind {
@@ -848,7 +993,7 @@ mod tests {
 
         let config = minimal_config(socket_path.to_string_lossy().to_string());
 
-        tokio::spawn(run(config, agent, storage, memories));
+        tokio::spawn(run(config, agent, storage, memories, db_path));
 
         // The listener binds synchronously near the top of `run`, but give it
         // a moment to actually get there before the first connection attempt.
@@ -888,6 +1033,80 @@ mod tests {
             found,
             "expected the prior outbound send in the LLM's message list, got: {:#?}",
             sent_messages
+        );
+    }
+
+    /// End-to-end for refactor plan 1.3: a wakeup seeded in the past should
+    /// get picked up by the tick loop, fire a `default`-skill run carrying
+    /// the wakeup's note, and flip to `fired` so it never fires again. Uses
+    /// `run_with_wakeup_tick` directly (rather than the public `run`, which
+    /// hardcodes the production 60s interval) with a short interval so the
+    /// test doesn't need a real-time wait.
+    #[tokio::test]
+    async fn test_due_wakeup_fires_through_daemon_tick() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("openferris.db");
+        let socket_path = tmp.path().join("daemon.sock");
+
+        let storage = Storage::open(&db_path).unwrap();
+        storage
+            .add_wakeup(
+                "2020-01-01 00:00:00",
+                "Check the openferris.org DNS propagated and tell the owner via Telegram.",
+            )
+            .unwrap();
+
+        let mock = Arc::new(MockLlm::new(vec!["DNS looks propagated.".to_string()]));
+        let agent = Agent::new(
+            Box::new(ArcMockLlm(mock.clone())),
+            ToolRegistry::new(),
+            String::new(),
+        );
+        let memories = Memories::new(tmp.path().join("MEMORIES.md"));
+        let config = minimal_config(socket_path.to_string_lossy().to_string());
+
+        tokio::spawn(run_with_wakeup_tick(
+            config,
+            agent,
+            storage,
+            memories,
+            db_path.clone(),
+            std::time::Duration::from_millis(50),
+        ));
+
+        // Poll for the mock to have been called — the tick fires on its own,
+        // with no client request needed.
+        let mut fired = false;
+        for _ in 0..100 {
+            if mock.call_count() >= 1 {
+                fired = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(fired, "wakeup never triggered a chat_completion call");
+
+        let sent_messages = mock.messages_at(0).unwrap();
+        let found = sent_messages.iter().any(|m| {
+            m.content
+                .contains("Check the openferris.org DNS propagated")
+                && m.content.contains("set_wakeup")
+        });
+        assert!(
+            found,
+            "expected the wakeup note in the fired run's context, got: {:#?}",
+            sent_messages
+        );
+
+        // The row must have flipped to fired so it's a one-shot, not
+        // re-fired on subsequent ticks.
+        let reader = Storage::open(&db_path).unwrap();
+        assert!(reader.pending_wakeups().unwrap().is_empty());
+        assert!(
+            reader
+                .due_wakeups(&storage::now_local())
+                .unwrap()
+                .is_empty()
         );
     }
 }

@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
             }
             tracing::info!("Memories at {}", mem_path.display());
 
-            daemon::run(config, agent, storage, mems).await?;
+            daemon::run(config, agent, storage, mems, db_path).await?;
         }
         Commands::Tui => {
             tui::run(&config.daemon.socket).await?;

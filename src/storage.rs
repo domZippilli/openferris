@@ -21,7 +21,23 @@ pub const KIND_CHAT: &str = "chat";
 /// append. Storing both as `chat` would duplicate it.
 pub const KIND_RUN_NOTE: &str = "run_note";
 
-fn now_local() -> String {
+/// `wakeups.status` for a wakeup that hasn't fired yet.
+pub const WAKEUP_PENDING: &str = "pending";
+/// `wakeups.status` for a wakeup the daemon tick has already fired.
+pub const WAKEUP_FIRED: &str = "fired";
+
+/// Current local time formatted `YYYY-MM-DD HH:MM:SS`, matching this file's
+/// `messages`/`interactions` timestamp convention (system-local clock, i.e.
+/// `chrono::Local`, not the user's *configured* `[user] timezone` — those
+/// coincide for the typical single-user self-hosted deployment this app
+/// targets, and every other stored timestamp already assumes system-local).
+/// `wakeups.due_ts` is stored in this same format for exactly that reason:
+/// it's compared against this function's output with plain string `<=`, which
+/// only gives correct chronological ordering because both sides share the
+/// same zero-padded `YYYY-MM-DD HH:MM:SS` shape. Callers that need to store a
+/// timestamp a caller supplied in a *different* timezone (see
+/// `tools/wakeup.rs`) must convert to system-local first.
+pub fn now_local() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
@@ -79,7 +95,16 @@ impl Storage {
                 kind TEXT NOT NULL DEFAULT 'chat',
                 content TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_messages_counterparty_ts ON messages(counterparty, ts, id);",
+            CREATE INDEX IF NOT EXISTS idx_messages_counterparty_ts ON messages(counterparty, ts, id);
+
+            CREATE TABLE IF NOT EXISTS wakeups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                due_ts TEXT NOT NULL,
+                note TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+            );
+            CREATE INDEX IF NOT EXISTS idx_wakeups_status_due ON wakeups(status, due_ts);",
         )?;
         Ok(Self { conn })
     }
@@ -276,6 +301,76 @@ impl Storage {
         }
 
         Ok(merged)
+    }
+
+    /// Record a one-shot wakeup. `due_ts` must already be in this file's
+    /// system-local `YYYY-MM-DD HH:MM:SS` convention (see [`now_local`]) —
+    /// callers accepting a user-facing due time in some other timezone must
+    /// convert it first. Returns the new row's id, so the caller (the
+    /// `set_wakeup` tool) can report it back for later `cancel`.
+    pub fn add_wakeup(&self, due_ts: &str, note: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO wakeups (created, due_ts, note, status) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![now_local(), due_ts, note, WAKEUP_PENDING],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Pending wakeups due at or before `now` (a `YYYY-MM-DD HH:MM:SS` string
+    /// in the same convention as [`now_local`]), oldest-due first. This is
+    /// what the daemon's tick task polls.
+    pub fn due_wakeups(&self, now: &str) -> Result<Vec<(i64, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, due_ts, note FROM wakeups
+             WHERE status = ?1 AND due_ts <= ?2
+             ORDER BY due_ts ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![WAKEUP_PENDING, now], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Mark a wakeup as fired. At-most-once: the daemon tick calls this
+    /// *before* enqueuing the wakeup's run, so a crash between the mark and
+    /// the run landing only ever loses a wakeup — it can never double-fire
+    /// one on restart, since a restarted tick would see `status = 'fired'`
+    /// and skip it.
+    pub fn mark_wakeup_fired(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE wakeups SET status = ?1 WHERE id = ?2",
+            rusqlite::params![WAKEUP_FIRED, id],
+        )?;
+        Ok(())
+    }
+
+    /// All pending (not yet fired or cancelled) wakeups, oldest-due first —
+    /// for the `set_wakeup` tool's `list` action.
+    pub fn pending_wakeups(&self) -> Result<Vec<(i64, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, due_ts, note FROM wakeups
+             WHERE status = ?1
+             ORDER BY due_ts ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![WAKEUP_PENDING], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Cancel a pending wakeup. Returns `true` if a pending row with this id
+    /// existed and was removed, `false` if it didn't exist, already fired, or
+    /// was already cancelled — so the tool can report which happened.
+    pub fn cancel_wakeup(&self, id: i64) -> Result<bool> {
+        let deleted = self.conn.execute(
+            "DELETE FROM wakeups WHERE id = ?1 AND status = ?2",
+            rusqlite::params![id, WAKEUP_PENDING],
+        )?;
+        Ok(deleted > 0)
     }
 }
 
@@ -532,5 +627,89 @@ mod tests {
         let tag = outbound_tag("telegram", "hello");
         assert!(tag.starts_with("[sent via telegram, "));
         assert!(tag.ends_with("] hello"));
+    }
+
+    #[test]
+    fn test_add_and_list_pending_wakeup() {
+        let s = temp_storage();
+        let id = s
+            .add_wakeup("2026-07-09 09:00:00", "Check if they replied")
+            .unwrap();
+        assert!(id > 0);
+
+        let pending = s.pending_wakeups().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, id);
+        assert_eq!(pending[0].1, "2026-07-09 09:00:00");
+        assert_eq!(pending[0].2, "Check if they replied");
+    }
+
+    #[test]
+    fn test_due_wakeups_only_returns_due_and_pending() {
+        let s = temp_storage();
+        let past = s.add_wakeup("2020-01-01 00:00:00", "past, due").unwrap();
+        let future = s
+            .add_wakeup("2099-01-01 00:00:00", "future, not due")
+            .unwrap();
+
+        let due = s.due_wakeups("2026-07-08 12:00:00").unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, past);
+        assert!(due.iter().all(|(id, _, _)| *id != future));
+    }
+
+    #[test]
+    fn test_due_wakeups_boundary_is_inclusive() {
+        let s = temp_storage();
+        let id = s
+            .add_wakeup("2026-07-08 09:00:00", "right on time")
+            .unwrap();
+        let due = s.due_wakeups("2026-07-08 09:00:00").unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, id);
+    }
+
+    #[test]
+    fn test_mark_wakeup_fired_excludes_it_from_due_and_pending() {
+        let s = temp_storage();
+        let id = s.add_wakeup("2020-01-01 00:00:00", "fire me").unwrap();
+
+        s.mark_wakeup_fired(id).unwrap();
+
+        assert!(s.due_wakeups("2026-07-08 00:00:00").unwrap().is_empty());
+        assert!(s.pending_wakeups().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_cancel_pending_wakeup_removes_it() {
+        let s = temp_storage();
+        let id = s.add_wakeup("2099-01-01 00:00:00", "cancel me").unwrap();
+
+        assert!(s.cancel_wakeup(id).unwrap());
+        assert!(s.pending_wakeups().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_cancel_nonexistent_or_fired_wakeup_returns_false() {
+        let s = temp_storage();
+        assert!(!s.cancel_wakeup(9999).unwrap());
+
+        let id = s
+            .add_wakeup("2020-01-01 00:00:00", "already fired")
+            .unwrap();
+        s.mark_wakeup_fired(id).unwrap();
+        assert!(!s.cancel_wakeup(id).unwrap());
+    }
+
+    #[test]
+    fn test_due_wakeups_ordered_oldest_due_first() {
+        let s = temp_storage();
+        let later = s.add_wakeup("2020-06-01 00:00:00", "later").unwrap();
+        let earlier = s.add_wakeup("2020-01-01 00:00:00", "earlier").unwrap();
+
+        let due = s.due_wakeups("2026-01-01 00:00:00").unwrap();
+        assert_eq!(due.len(), 2);
+        assert_eq!(due[0].0, earlier);
+        assert_eq!(due[1].0, later);
     }
 }

@@ -11,6 +11,7 @@ tools:
   - web_search
   - scrape_url
   - stealth_fetch
+  - set_wakeup
   - send_telegram
   - send_email
   - gws
@@ -43,3 +44,5 @@ Work through every due goal in this single run before finishing. There's no per-
 ## Do not schedule
 
 Do not call the `schedule` tool -- it's not in your allowlist. Cadence comes from the cron entry that invokes this skill, not from anything you create per-goal.
+
+`next_check` is this skill's own coarse timing mechanism -- it only fires on this cron cadence, so it's "sometime after," not a precise appointment. If a due goal needs a precise-time or one-shot follow-up that isn't the goal's own pacing (e.g. it just promised the owner an answer by a specific time today), use `set_wakeup` for that piece instead of trying to make `next_check` do it.
