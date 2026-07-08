@@ -2,8 +2,35 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 
+use crate::llm::{ChatMessage, Role};
+
 pub struct Storage {
     conn: Connection,
+}
+
+/// `direction` value for a message the user (or an external sender) sent
+/// *to* the agent.
+pub const DIRECTION_INBOUND: &str = "inbound";
+/// `direction` value for a message the agent sent *to* a counterparty.
+pub const DIRECTION_OUTBOUND: &str = "outbound";
+/// `kind` for a normal thread turn (rendered as history for the LLM).
+pub const KIND_CHAT: &str = "chat";
+/// `kind` for a scheduled/skill run's final response — kept for audit but
+/// excluded from thread rendering, since the run's user-visible output (if
+/// any) already reached the thread via a delivery tool's own `KIND_CHAT`
+/// append. Storing both as `chat` would duplicate it.
+pub const KIND_RUN_NOTE: &str = "run_note";
+
+fn now_local() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Build the `[sent via <channel>, <timestamp>] <text>` tag prefixed onto
+/// outbound thread turns logged by delivery tools (send_telegram, send_email,
+/// Gmail auto-replies), so the thread makes clear these lines were an actual
+/// delivered message rather than an ordinary assistant reply.
+pub fn outbound_tag(channel: &str, text: &str) -> String {
+    format!("[sent via {}, {}] {}", channel, now_local(), text)
 }
 
 pub fn truncate(s: &str, max_len: usize) -> &str {
@@ -41,13 +68,20 @@ impl Storage {
             CREATE TABLE IF NOT EXISTS known_contacts (
                 email TEXT PRIMARY KEY,
                 first_contacted TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                counterparty TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'chat',
+                content TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_counterparty_ts ON messages(counterparty, ts, id);",
         )?;
         Ok(Self { conn })
-    }
-
-    fn now_local() -> String {
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
     }
 
     pub fn log_interaction(
@@ -59,7 +93,7 @@ impl Storage {
     ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO interactions (timestamp, source, skill, user_message, agent_response) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![Self::now_local(), source, skill, user_message, agent_response],
+            rusqlite::params![now_local(), source, skill, user_message, agent_response],
         )?;
         Ok(())
     }
@@ -142,7 +176,7 @@ impl Storage {
     pub fn add_contact(&self, email: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO known_contacts (email, first_contacted) VALUES (?1, ?2)",
-            rusqlite::params![email.to_lowercase(), Self::now_local()],
+            rusqlite::params![email.to_lowercase(), now_local()],
         )?;
         Ok(())
     }
@@ -157,6 +191,91 @@ impl Storage {
             None => self.conn.execute("DELETE FROM interactions", [])?,
         };
         Ok(deleted)
+    }
+
+    /// Append a user-visible message to a counterparty's thread. `direction`
+    /// should be [`DIRECTION_INBOUND`] or [`DIRECTION_OUTBOUND`]; `kind`
+    /// should be [`KIND_CHAT`] (rendered as history) or [`KIND_RUN_NOTE`]
+    /// (audit-only, excluded from [`Storage::load_thread`]).
+    ///
+    /// Never call this for tool calls/results or intermediate agent
+    /// iterations — only for inbound texts, outbound sends, and final
+    /// responses (see the architecture doc for the coherence design).
+    pub fn append_message(
+        &self,
+        counterparty: &str,
+        channel: &str,
+        direction: &str,
+        kind: &str,
+        content: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO messages (ts, counterparty, channel, direction, kind, content) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![now_local(), counterparty, channel, direction, kind, content],
+        )?;
+        Ok(())
+    }
+
+    /// Load a counterparty's thread as `ChatMessage`s for the agent, oldest
+    /// first, capped to `max_chars_budget` (a byte/char budget, not tokens —
+    /// callers size this from the model's context window the same way
+    /// `agent::estimate_tokens` reasons about it). Only `kind = "chat"` rows
+    /// are returned; `run_note` rows are audit-only and never rendered here.
+    ///
+    /// Walks newest-first and stops once the accumulated budget would be
+    /// exceeded, but always keeps at least the single most recent message
+    /// even if it alone is over budget — mirroring the "always keep the most
+    /// recent pair" rule the in-run compactor uses, so a follow-up always has
+    /// its immediate antecedent.
+    ///
+    /// Adjacent messages with the same resolved role (e.g. two outbound sends
+    /// with no reply in between) are merged into one `ChatMessage`, since
+    /// consecutive same-role turns are otherwise just noise in the transcript
+    /// (the OpenAI-compat text prompt tolerates them either way).
+    pub fn load_thread(
+        &self,
+        counterparty: &str,
+        max_chars_budget: usize,
+    ) -> Result<Vec<ChatMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT direction, content FROM messages
+             WHERE counterparty = ?1 AND kind = ?2
+             ORDER BY ts DESC, id DESC",
+        )?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map(rusqlite::params![counterparty, KIND_CHAT], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut selected: Vec<(String, String)> = Vec::new();
+        let mut used = 0usize;
+        for (direction, content) in rows {
+            if !selected.is_empty() && used + content.len() > max_chars_budget {
+                break;
+            }
+            used += content.len();
+            selected.push((direction, content));
+        }
+        selected.reverse(); // now oldest-first
+
+        let mut merged: Vec<ChatMessage> = Vec::new();
+        for (direction, content) in selected {
+            let role = if direction == DIRECTION_OUTBOUND {
+                Role::Assistant
+            } else {
+                Role::User
+            };
+            match merged.last_mut() {
+                Some(last) if last.role == role => {
+                    last.content.push_str("\n\n");
+                    last.content.push_str(&content);
+                }
+                _ => merged.push(ChatMessage { role, content }),
+            }
+        }
+
+        Ok(merged)
     }
 }
 
@@ -259,5 +378,159 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM known_contacts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(contacts, THREADS * WRITES_PER_THREAD);
+    }
+
+    #[test]
+    fn test_append_and_load_thread_roundtrip() {
+        let s = temp_storage();
+        s.append_message("owner", "tui", DIRECTION_INBOUND, KIND_CHAT, "Hi there")
+            .unwrap();
+        s.append_message(
+            "owner",
+            "tui",
+            DIRECTION_OUTBOUND,
+            KIND_CHAT,
+            "Hello! How can I help?",
+        )
+        .unwrap();
+
+        let thread = s.load_thread("owner", 100_000).unwrap();
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].role, Role::User);
+        assert_eq!(thread[0].content, "Hi there");
+        assert_eq!(thread[1].role, Role::Assistant);
+        assert_eq!(thread[1].content, "Hello! How can I help?");
+    }
+
+    #[test]
+    fn test_load_thread_is_scoped_to_counterparty() {
+        let s = temp_storage();
+        s.append_message("owner", "tui", DIRECTION_INBOUND, KIND_CHAT, "For owner")
+            .unwrap();
+        s.append_message(
+            "email:stranger@example.com",
+            "email",
+            DIRECTION_INBOUND,
+            KIND_CHAT,
+            "For stranger",
+        )
+        .unwrap();
+
+        let owner_thread = s.load_thread("owner", 100_000).unwrap();
+        assert_eq!(owner_thread.len(), 1);
+        assert_eq!(owner_thread[0].content, "For owner");
+    }
+
+    #[test]
+    fn test_load_thread_excludes_run_notes() {
+        let s = temp_storage();
+        s.append_message("owner", "tui", DIRECTION_INBOUND, KIND_CHAT, "Chat turn")
+            .unwrap();
+        s.append_message(
+            "owner",
+            "daemon",
+            DIRECTION_OUTBOUND,
+            KIND_RUN_NOTE,
+            "Final response of a scheduled skill run",
+        )
+        .unwrap();
+
+        let thread = s.load_thread("owner", 100_000).unwrap();
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].content, "Chat turn");
+    }
+
+    #[test]
+    fn test_load_thread_merges_adjacent_same_role() {
+        let s = temp_storage();
+        s.append_message("owner", "tui", DIRECTION_INBOUND, KIND_CHAT, "Question")
+            .unwrap();
+        // Two outbound sends with no reply in between (e.g. two send_telegram
+        // calls in the same run, or a run's send followed by a later notify).
+        s.append_message(
+            "owner",
+            "telegram",
+            DIRECTION_OUTBOUND,
+            KIND_CHAT,
+            "First send",
+        )
+        .unwrap();
+        s.append_message(
+            "owner",
+            "telegram",
+            DIRECTION_OUTBOUND,
+            KIND_CHAT,
+            "Second send",
+        )
+        .unwrap();
+
+        let thread = s.load_thread("owner", 100_000).unwrap();
+        assert_eq!(
+            thread.len(),
+            2,
+            "the two outbound turns should merge into one"
+        );
+        assert_eq!(thread[0].role, Role::User);
+        assert_eq!(thread[1].role, Role::Assistant);
+        assert!(thread[1].content.contains("First send"));
+        assert!(thread[1].content.contains("Second send"));
+    }
+
+    #[test]
+    fn test_load_thread_trims_to_budget_but_keeps_newest() {
+        let s = temp_storage();
+        for i in 0..10 {
+            s.append_message(
+                "owner",
+                "tui",
+                if i % 2 == 0 {
+                    DIRECTION_INBOUND
+                } else {
+                    DIRECTION_OUTBOUND
+                },
+                KIND_CHAT,
+                &format!("turn {} {}", i, "x".repeat(50)),
+            )
+            .unwrap();
+        }
+
+        // Budget only large enough for ~2 messages.
+        let thread = s.load_thread("owner", 130).unwrap();
+        assert!(
+            thread.len() < 10,
+            "expected older turns to be trimmed, got {} messages",
+            thread.len()
+        );
+        // The single newest turn is always kept even alone.
+        let newest = thread.last().unwrap();
+        assert!(newest.content.contains("turn 9"));
+    }
+
+    #[test]
+    fn test_load_thread_keeps_single_oversized_newest_message() {
+        let s = temp_storage();
+        s.append_message(
+            "owner",
+            "tui",
+            DIRECTION_INBOUND,
+            KIND_CHAT,
+            &"x".repeat(1000),
+        )
+        .unwrap();
+
+        // Budget smaller than the one message that exists.
+        let thread = s.load_thread("owner", 10).unwrap();
+        assert_eq!(
+            thread.len(),
+            1,
+            "the most recent message must survive even if it alone exceeds budget"
+        );
+    }
+
+    #[test]
+    fn test_outbound_tag_format() {
+        let tag = outbound_tag("telegram", "hello");
+        assert!(tag.starts_with("[sent via telegram, "));
+        assert!(tag.ends_with("] hello"));
     }
 }

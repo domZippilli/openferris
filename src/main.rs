@@ -156,7 +156,12 @@ async fn main() -> Result<()> {
             let gmail_config = config.gmail.clone().ok_or_else(|| {
                 anyhow::anyhow!("No [gmail] section in config.toml. Add allowed_senders to enable.")
             })?;
-            gmail::run(config.daemon.socket.clone(), gmail_config).await?;
+            gmail::run(
+                config.daemon.socket.clone(),
+                gmail_config,
+                config.user.emails.clone(),
+            )
+            .await?;
         }
         Commands::TestAgent { prompt, skill } => {
             let soul = config::load_soul()?;

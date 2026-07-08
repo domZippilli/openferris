@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -8,12 +7,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use openferris::agent::{Agent, AgentResult};
 use openferris::config::{self, AppConfig};
+use openferris::counterparty;
 use openferris::llm::{ChatMessage, Role};
 use openferris::protocol::{
     AgentNotification, DaemonRequest, DaemonResponse, RequestKind, ResponseKind,
 };
 use openferris::skills;
-use openferris::storage::Storage;
+use openferris::storage::{self, Storage};
 
 use crate::memories::Memories;
 
@@ -23,21 +23,45 @@ struct QueuedRequest {
     progress_tx: mpsc::UnboundedSender<AgentNotification>,
 }
 
-/// Fraction of the model's context window the stored per-session history is
-/// allowed to occupy. The rest is left for the system prompt, persistent
-/// context, the current turn, and tool round-trips (the agent still compacts
-/// in-run as a backstop). Half keeps a fresh turn comfortably within budget.
+/// Fraction of the model's context window the stored per-counterparty thread
+/// history is allowed to occupy. The rest is left for the system prompt,
+/// persistent context, the current turn, and tool round-trips (the agent
+/// still compacts in-run as a backstop). Half keeps a fresh turn comfortably
+/// within budget.
 const HISTORY_TOKEN_FRACTION: f32 = 0.5;
+/// Rough chars-per-token conversion, matching `agent::estimate_tokens`'s
+/// chars/4 heuristic — `Storage::load_thread` budgets in chars, not tokens,
+/// since it never tokenizes.
+const CHARS_PER_TOKEN_ESTIMATE: usize = 4;
+/// Fallback token budget when the backend's context window can't be queried.
+const DEFAULT_HISTORY_TOKEN_BUDGET: usize = 50_000;
 const GOAL_SKILL_NAME: &str = "goal-pursuit";
 const GOAL_MAX_TURNS_HARD: usize = 25;
 
-/// Drop whole oldest turns (user+assistant pairs) from the front until the
-/// estimated token count fits `budget`. Always keeps at least the most recent
-/// pair so a follow-up still has its immediate antecedent.
-fn trim_history(history: &mut Vec<ChatMessage>, budget: usize) {
-    while history.len() > 2 && openferris::agent::estimate_tokens(history) > budget {
-        history.drain(0..2);
+/// Resolve the DB-thread counterparty for a `FreeformMessage`'s session_id.
+///
+/// TUI sessions (`tui:<uuid>`) and anything else not recognized below are
+/// treated as the owner — the only two owner-facing interactive surfaces
+/// today are Telegram and the TUI, and the TUI has no per-chat identity to
+/// check. Telegram sessions encode the chat_id as `telegram:<chat_id>` and
+/// resolve through the configured allowlist/default chat (see
+/// `openferris::counterparty::telegram_counterparty`); by the time a message
+/// reaches the daemon the transport has usually already rejected
+/// non-allowlisted chats, so this mostly resolves to the owner too.
+fn resolve_counterparty(session_id: &str, config: &AppConfig) -> String {
+    if let Some(chat_id_str) = session_id.strip_prefix("telegram:") {
+        if let (Ok(chat_id), Some(tg)) = (chat_id_str.parse::<i64>(), config.telegram.as_ref()) {
+            return counterparty::telegram_counterparty(
+                chat_id,
+                tg.default_chat_id,
+                &tg.allowed_users,
+            );
+        }
+        // No [telegram] config or an unparseable chat id: still bucket by
+        // chat rather than defaulting to the owner thread.
+        return format!("telegram:{}", chat_id_str);
     }
+    counterparty::OWNER.to_string()
 }
 
 /// Data needed to log an interaction after the agent finishes.
@@ -55,16 +79,18 @@ pub async fn run(
     memories: Memories,
 ) -> Result<()> {
     let agent = Arc::new(agent);
-    let socket_path = &config.daemon.socket;
+    // Owned (not borrowed from `config`) so `config` can move wholesale into
+    // the worker task below, which needs it to resolve counterparties.
+    let socket_path = config.daemon.socket.clone();
     // Remove stale socket file from a previous run
-    if std::path::Path::new(socket_path).exists() {
-        std::fs::remove_file(socket_path)?;
+    if std::path::Path::new(&socket_path).exists() {
+        std::fs::remove_file(&socket_path)?;
     }
-    let listener = UnixListener::bind(socket_path)?;
+    let listener = UnixListener::bind(&socket_path)?;
     // Restrict socket to owner only
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     }
     // Publish the resolved socket path so CLI clients that compute a different
     // default (e.g. cron without $XDG_RUNTIME_DIR) can fall back to the real one.
@@ -72,7 +98,7 @@ pub async fn run(
     if let Some(parent) = pointer.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&pointer, socket_path) {
+    if let Err(e) = std::fs::write(&pointer, &socket_path) {
         tracing::warn!(
             "Failed to write socket pointer file {}: {}",
             pointer.display(),
@@ -87,11 +113,12 @@ pub async fn run(
     let worker_agent = agent.clone();
     let user_skills_dir = config::config_dir().join("skills");
     tokio::spawn(async move {
-        // Per-conversation history, keyed by request.session_id. Lives for the
-        // life of the daemon process (in-memory; cleared on restart) so a chat
-        // stays coherent across the separate connections clients open per
-        // message. The single worker owns it, so no locking is needed.
-        let mut sessions: HashMap<String, Vec<ChatMessage>> = HashMap::new();
+        // `config` moves in wholesale: the worker needs `config.telegram` to
+        // resolve counterparties (see `resolve_counterparty`). Conversation
+        // history itself now lives in `storage`'s `messages` table, keyed by
+        // counterparty rather than transport session — it survives daemon
+        // restarts and is shared across channels for the same counterparty.
+        let config = config;
         while let Some(queued) = rx.recv().await {
             let request_id = queued.request.id.clone();
 
@@ -141,17 +168,43 @@ pub async fn run(
             let identity = config::load_identity();
             let user_profile = config::load_user();
 
-            // Conversation continuity: only freeform messages carrying a
-            // session_id thread together. Pull the prior turns for this session
-            // (a clone, so the worker can update the canonical copy afterward).
-            let session_key = match &queued.request.kind {
-                RequestKind::FreeformMessage { .. } => queued.request.session_id.clone(),
+            // Conversation continuity: only freeform messages from an owner
+            // surface (Telegram, TUI) thread together, keyed by the resolved
+            // counterparty rather than the raw session_id — so the same
+            // person is coherent across channels, and restarts don't wipe it.
+            let counterparty: Option<String> = match &queued.request.kind {
+                RequestKind::FreeformMessage { .. } => queued
+                    .request
+                    .session_id
+                    .as_deref()
+                    .map(|sid| resolve_counterparty(sid, &config)),
                 _ => None,
             };
-            let history: Vec<ChatMessage> = session_key
-                .as_ref()
-                .and_then(|k| sessions.get(k).cloned())
-                .unwrap_or_default();
+
+            let history: Vec<ChatMessage> = match &counterparty {
+                Some(cp) => {
+                    let token_budget = match worker_agent.context_window_tokens().await {
+                        Ok(n) => ((n as f32) * HISTORY_TOKEN_FRACTION) as usize,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Could not size history budget: {}; using {}",
+                                e,
+                                DEFAULT_HISTORY_TOKEN_BUDGET
+                            );
+                            DEFAULT_HISTORY_TOKEN_BUDGET
+                        }
+                    };
+                    let char_budget = token_budget * CHARS_PER_TOKEN_ESTIMATE;
+                    match storage.load_thread(cp, char_budget) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            tracing::warn!("Failed to load thread for {}: {}", cp, e);
+                            Vec::new()
+                        }
+                    }
+                }
+                None => Vec::new(),
+            };
 
             // Async: run agent
             let progress_tx = queued.progress_tx.clone();
@@ -185,30 +238,71 @@ pub async fn run(
                 }
             }
 
-            // Record this turn so the session stays coherent on the next
-            // message. Only on success: a failed turn shouldn't poison future
-            // context, and skipping it keeps user/assistant pairs aligned.
-            if let (Some(key), RequestKind::FreeformMessage { text }) =
-                (&session_key, &queued.request.kind)
-                && let ResponseKind::Done { text: ref reply } = response.kind
-            {
-                let budget = match worker_agent.context_window_tokens().await {
-                    Ok(n) => ((n as f32) * HISTORY_TOKEN_FRACTION) as usize,
-                    Err(e) => {
-                        tracing::warn!("Could not size history budget: {}; using 50_000", e);
-                        50_000
+            // Thread persistence: append user-visible turns to the messages
+            // table. Only on success: a failed turn shouldn't poison future
+            // context. Never persists tool calls/results/intermediate
+            // iterations — only the inbound text and the final response.
+            if let ResponseKind::Done { text: ref reply } = response.kind {
+                let source = queued
+                    .request
+                    .source
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                match &queued.request.kind {
+                    RequestKind::FreeformMessage { text } => {
+                        if let Some(cp) = &counterparty {
+                            if let Err(e) = storage.append_message(
+                                cp,
+                                &source,
+                                storage::DIRECTION_INBOUND,
+                                storage::KIND_CHAT,
+                                text,
+                            ) {
+                                tracing::warn!(
+                                    "Failed to append inbound message to thread {}: {}",
+                                    cp,
+                                    e
+                                );
+                            }
+                            if let Err(e) = storage.append_message(
+                                cp,
+                                &source,
+                                storage::DIRECTION_OUTBOUND,
+                                storage::KIND_CHAT,
+                                reply,
+                            ) {
+                                tracing::warn!(
+                                    "Failed to append outbound message to thread {}: {}",
+                                    cp,
+                                    e
+                                );
+                            }
+                        }
                     }
-                };
-                let entry = sessions.entry(key.clone()).or_default();
-                entry.push(ChatMessage {
-                    role: Role::User,
-                    content: text.clone(),
-                });
-                entry.push(ChatMessage {
-                    role: Role::Assistant,
-                    content: reply.clone(),
-                });
-                trim_history(entry, budget);
+                    RequestKind::RunSkill { .. } | RequestKind::PursueGoal { .. } => {
+                        // Scheduled/skill runs and goal pursuits don't run
+                        // with the owner thread as history (they start from
+                        // their skill prompt + the interaction annex), but
+                        // their final response is recorded to the owner
+                        // thread as a run_note: audited, but excluded from
+                        // thread rendering so it doesn't duplicate whatever
+                        // the run may have already sent via a delivery tool.
+                        if let Err(e) = storage.append_message(
+                            counterparty::OWNER,
+                            &source,
+                            storage::DIRECTION_OUTBOUND,
+                            storage::KIND_RUN_NOTE,
+                            reply,
+                        ) {
+                            tracing::warn!("Failed to append run note to owner thread: {}", e);
+                        }
+                    }
+                    // StoreMemory is handled before the worker queue and
+                    // never reaches here; if that ever changes, there's
+                    // nothing to persist to a thread — don't panic the
+                    // worker over it.
+                    RequestKind::StoreMemory { .. } => {}
+                }
             }
 
             let _ = queued.response_tx.send(response);
@@ -300,9 +394,10 @@ pub async fn run(
                                     }
                                     match result {
                                         Ok(response) => {
-                                            // Session history now lives in the
-                                            // worker (keyed by session_id), so
-                                            // the connection just relays the
+                                            // Thread history now lives in
+                                            // storage (keyed by resolved
+                                            // counterparty), so the
+                                            // connection just relays the
                                             // response to the client.
                                             let _ = write_response(&mut writer, &response).await;
                                         }
@@ -627,4 +722,172 @@ fn strip_goal_status(text: &str) -> String {
     out.push_str(&text[..start]);
     out.push_str(&text[end..]);
     out.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openferris::config::{
+        CamoufoxConfig, DaemonConfig, FetchConfig, FilesConfig, FirecrawlConfig, GwsConfig,
+        LlmConfig, SearchConfig, UserConfig,
+    };
+    use openferris::llm::mock::MockLlm;
+    use openferris::llm::{ChunkCallback, LlmBackend};
+    use openferris::tools::ToolRegistry;
+    use std::sync::Arc;
+
+    /// Resolver tests for `resolve_counterparty`. The Telegram/email-specific
+    /// mapping rules themselves are covered in `openferris::counterparty`'s
+    /// own tests; this only checks the session_id-parsing glue that's local
+    /// to the daemon.
+    fn minimal_config(socket: String) -> AppConfig {
+        AppConfig {
+            user: UserConfig {
+                timezone: "UTC".to_string(),
+                zip_code: None,
+                emails: vec![],
+            },
+            llm: LlmConfig {
+                backend: "mock".to_string(),
+                endpoint: String::new(),
+                model: None,
+                temperature: 0.6,
+                top_k: 20,
+                enable_thinking: false,
+                parallel_slots: 1,
+            },
+            daemon: DaemonConfig { socket },
+            files: FilesConfig::default(),
+            fetch: FetchConfig::default(),
+            gws: GwsConfig::default(),
+            search: None::<SearchConfig>,
+            firecrawl: None::<FirecrawlConfig>,
+            camoufox: None::<CamoufoxConfig>,
+            telegram: None,
+            gmail: None,
+        }
+    }
+
+    #[test]
+    fn test_resolve_counterparty_tui_is_owner() {
+        let config = minimal_config("/tmp/unused.sock".to_string());
+        assert_eq!(
+            resolve_counterparty("tui:some-uuid", &config),
+            counterparty::OWNER
+        );
+    }
+
+    #[test]
+    fn test_resolve_counterparty_telegram_without_config_buckets_by_chat() {
+        let config = minimal_config("/tmp/unused.sock".to_string());
+        assert_eq!(
+            resolve_counterparty("telegram:555", &config),
+            "telegram:555"
+        );
+    }
+
+    /// A `LlmBackend` that forwards to a shared `Arc<MockLlm>`, so a test can
+    /// keep its own handle to the mock (to inspect `messages_at`/`call_count`)
+    /// even though `Agent::new` takes ownership of a `Box<dyn LlmBackend>`.
+    struct ArcMockLlm(Arc<MockLlm>);
+
+    #[async_trait::async_trait]
+    impl LlmBackend for ArcMockLlm {
+        async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
+            self.0.chat_completion(messages).await
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            messages: &[ChatMessage],
+            on_chunk: ChunkCallback<'_>,
+        ) -> Result<String> {
+            self.0.chat_completion_stream(messages, on_chunk).await
+        }
+
+        async fn context_window_tokens(&self) -> Result<usize> {
+            self.0.context_window_tokens().await
+        }
+    }
+
+    /// End-to-end: an outbound send that landed in the owner's thread before
+    /// this turn started (simulating what `send_telegram`/`send_email` append
+    /// on every delivery — see tools/telegram.rs, email.rs) is visible to the
+    /// LLM as history on the *next* FreeformMessage from an owner surface.
+    /// This is the coherence bug from the refactor plan: previously, only the
+    /// in-memory per-session_id history fed the model, so a prior outbound
+    /// send never appeared in what the model saw on a follow-up turn.
+    #[tokio::test]
+    async fn test_prior_outbound_send_appears_in_next_turn_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("openferris.db");
+        let socket_path = tmp.path().join("daemon.sock");
+
+        let storage = Storage::open(&db_path).unwrap();
+        // Simulate a prior send_telegram call: an outbound chat turn in the
+        // owner thread, with no FreeformMessage round trip involved at all.
+        storage
+            .append_message(
+                counterparty::OWNER,
+                "telegram",
+                storage::DIRECTION_OUTBOUND,
+                storage::KIND_CHAT,
+                &storage::outbound_tag("telegram", "Don't forget the 3pm meeting"),
+            )
+            .unwrap();
+
+        let mock = Arc::new(MockLlm::new(vec![
+            "Sure — you asked about the meeting I mentioned.".to_string(),
+        ]));
+        let agent = Agent::new(
+            Box::new(ArcMockLlm(mock.clone())),
+            ToolRegistry::new(),
+            String::new(),
+        );
+        let memories = Memories::new(tmp.path().join("MEMORIES.md"));
+
+        let config = minimal_config(socket_path.to_string_lossy().to_string());
+
+        tokio::spawn(run(config, agent, storage, memories));
+
+        // The listener binds synchronously near the top of `run`, but give it
+        // a moment to actually get there before the first connection attempt.
+        let socket_str = socket_path.to_string_lossy().to_string();
+        let mut connected = false;
+        for _ in 0..100 {
+            if tokio::net::UnixStream::connect(&socket_str).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(connected, "daemon never came up on {}", socket_str);
+
+        let request = DaemonRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: RequestKind::FreeformMessage {
+                text: "What did you send me earlier?".to_string(),
+            },
+            source: Some("tui".to_string()),
+            session_id: Some("tui:test-session".to_string()),
+        };
+
+        let reply = crate::client::send_request(&socket_str, &request)
+            .await
+            .unwrap();
+        assert_eq!(reply, "Sure — you asked about the meeting I mentioned.");
+
+        // The one (and only) chat_completion call must have had the prior
+        // outbound send in its message list.
+        assert_eq!(mock.call_count(), 1);
+        let sent_messages = mock.messages_at(0).unwrap();
+        let found = sent_messages
+            .iter()
+            .any(|m| m.content.contains("Don't forget the 3pm meeting"));
+        assert!(
+            found,
+            "expected the prior outbound send in the LLM's message list, got: {:#?}",
+            sent_messages
+        );
+    }
 }

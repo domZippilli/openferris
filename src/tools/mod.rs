@@ -135,6 +135,7 @@ impl ToolRegistry {
             self.register(Box::new(telegram::SendTelegramTool::new(
                 tg.bot_token.clone(),
                 tg.default_chat_id,
+                tg.allowed_users.clone(),
             )));
         }
     }
@@ -145,6 +146,7 @@ impl ToolRegistry {
             self.register(Box::new(telegram::SendTelegramTool::new_with_storage(
                 tg.bot_token.clone(),
                 tg.default_chat_id,
+                tg.allowed_users.clone(),
                 db_path.clone(),
             )));
         }
@@ -154,6 +156,7 @@ impl ToolRegistry {
                 db_path,
                 gmail.allowed_senders.clone(),
                 gmail.always_cc.clone(),
+                config.user.emails.clone(),
             )));
         }
     }

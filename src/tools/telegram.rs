@@ -8,14 +8,19 @@ use crate::storage::Storage;
 pub struct SendTelegramTool {
     bot_token: String,
     default_chat_id: Option<i64>,
+    /// Telegram user/chat ids configured as the owner (see
+    /// `[telegram].allowed_users`). Used to resolve which message thread
+    /// (`crate::counterparty`) an outbound send belongs to.
+    allowed_users: Vec<u64>,
     db_path: Option<PathBuf>,
 }
 
 impl SendTelegramTool {
-    pub fn new(bot_token: String, default_chat_id: Option<i64>) -> Self {
+    pub fn new(bot_token: String, default_chat_id: Option<i64>, allowed_users: Vec<u64>) -> Self {
         Self {
             bot_token,
             default_chat_id,
+            allowed_users,
             db_path: None,
         }
     }
@@ -23,11 +28,13 @@ impl SendTelegramTool {
     pub fn new_with_storage(
         bot_token: String,
         default_chat_id: Option<i64>,
+        allowed_users: Vec<u64>,
         db_path: PathBuf,
     ) -> Self {
         Self {
             bot_token,
             default_chat_id,
+            allowed_users,
             db_path: Some(db_path),
         }
     }
@@ -101,6 +108,28 @@ impl Tool for SendTelegramTool {
                         message,
                     ) {
                         tracing::warn!("Failed to log outbound Telegram message: {}", e);
+                    }
+
+                    // Thread persistence: this send is an outbound chat turn
+                    // in the recipient's message thread (owner if chat_id
+                    // resolves to the owner; otherwise a per-chat bucket).
+                    let counterparty = crate::counterparty::telegram_counterparty(
+                        chat_id,
+                        self.default_chat_id,
+                        &self.allowed_users,
+                    );
+                    if let Err(e) = store.append_message(
+                        &counterparty,
+                        "telegram",
+                        crate::storage::DIRECTION_OUTBOUND,
+                        crate::storage::KIND_CHAT,
+                        &crate::storage::outbound_tag("telegram", message),
+                    ) {
+                        tracing::warn!(
+                            "Failed to append outbound Telegram message to thread {}: {}",
+                            counterparty,
+                            e
+                        );
                     }
                 }
                 Err(e) => {

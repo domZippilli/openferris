@@ -8,14 +8,21 @@ pub struct SendEmailTool {
     db_path: PathBuf,
     allowed_senders: Vec<String>,
     always_cc: Option<String>,
+    owner_emails: Vec<String>,
 }
 
 impl SendEmailTool {
-    pub fn new(db_path: PathBuf, allowed_senders: Vec<String>, always_cc: Option<String>) -> Self {
+    pub fn new(
+        db_path: PathBuf,
+        allowed_senders: Vec<String>,
+        always_cc: Option<String>,
+        owner_emails: Vec<String>,
+    ) -> Self {
         Self {
             db_path,
             allowed_senders,
             always_cc,
+            owner_emails,
         }
     }
 }
@@ -60,6 +67,7 @@ impl Tool for SendEmailTool {
         crate::email::send_email_with_db(
             &self.db_path,
             &self.allowed_senders,
+            &self.owner_emails,
             to,
             self.always_cc.as_deref(),
             param_cc,

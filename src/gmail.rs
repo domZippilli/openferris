@@ -108,7 +108,11 @@ impl GmailState {
 
 // --- Main entry point ---
 
-pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()> {
+pub async fn run(
+    daemon_address: String,
+    gmail_config: GmailConfig,
+    owner_emails: Vec<String>,
+) -> Result<()> {
     let mut state = GmailState::load();
 
     let db_path = openferris::config::data_dir().join("openferris.db");
@@ -182,6 +186,7 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
             &storage,
             &mut state,
             &our_email,
+            &owner_emails,
         )
         .await
         {
@@ -218,6 +223,7 @@ async fn poll_once(
     storage: &Storage,
     state: &mut GmailState,
     our_email: &str,
+    owner_emails: &[String],
 ) -> Result<()> {
     tracing::info!("Gmail: polling for new messages");
 
@@ -295,8 +301,16 @@ async fn poll_once(
     tracing::info!("Gmail: {} new message(s)", message_ids.len());
 
     for msg_id in &message_ids {
-        if let Err(e) =
-            process_message(daemon_address, config, storage, state, our_email, msg_id).await
+        if let Err(e) = process_message(
+            daemon_address,
+            config,
+            storage,
+            state,
+            our_email,
+            owner_emails,
+            msg_id,
+        )
+        .await
         {
             tracing::error!("Error processing message {}: {:#}", msg_id, e);
         }
@@ -311,6 +325,7 @@ async fn process_message(
     storage: &Storage,
     state: &mut GmailState,
     our_email: &str,
+    owner_emails: &[String],
     msg_id: &str,
 ) -> Result<()> {
     let params = format!(r#"{{"userId":"me","id":"{}","format":"full"}}"#, msg_id);
@@ -394,6 +409,26 @@ async fn process_message(
         body
     };
 
+    // Thread persistence: record the inbound email as a chat turn in the
+    // sender's counterparty thread (owner if `sender_email` is one of the
+    // owner's configured addresses, otherwise a per-address "email:<addr>"
+    // thread). Best-effort — a logging failure shouldn't drop the reply.
+    let inbound_counterparty =
+        openferris::counterparty::email_counterparty(&sender_email, owner_emails);
+    if let Err(e) = storage.append_message(
+        &inbound_counterparty,
+        "email",
+        openferris::storage::DIRECTION_INBOUND,
+        openferris::storage::KIND_CHAT,
+        &body,
+    ) {
+        tracing::warn!(
+            "Failed to append inbound email to thread {}: {}",
+            inbound_counterparty,
+            e
+        );
+    }
+
     // Pull the thread once. Gmail is the source of truth for it (it captures
     // replies sent from other clients we never saw), so we fetch fresh rather
     // than reconstructing from any local history. Best-effort: a failed fetch
@@ -462,6 +497,7 @@ async fn process_message(
     email::send_email(
         storage,
         &config.allowed_senders,
+        owner_emails,
         Some(our_email),
         &from,
         cc.as_deref(),

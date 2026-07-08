@@ -6,6 +6,7 @@ pub mod skills;
 pub mod tools;
 
 // These are needed by the public modules above but not directly by tests.
+pub mod counterparty;
 pub mod email;
 pub mod protocol;
 pub mod storage;

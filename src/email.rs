@@ -24,6 +24,7 @@ use crate::storage::Storage;
 pub async fn send_email(
     storage: &Storage,
     allowed_senders: &[String],
+    owner_emails: &[String],
     from: Option<&str>,
     to: &str,
     vetted_cc: Option<&str>,
@@ -83,6 +84,25 @@ pub async fn send_email(
     // Record the recipient as a known contact
     storage.add_contact(&recipient)?;
 
+    // Thread persistence: the recipient's counterparty thread gets this send
+    // as an outbound chat turn (owner email -> the shared "owner" thread;
+    // anyone else -> their own "email:<addr>" thread). Best-effort: a logging
+    // failure shouldn't fail a send that already went out.
+    let counterparty = crate::counterparty::email_counterparty(&recipient, owner_emails);
+    if let Err(e) = storage.append_message(
+        &counterparty,
+        "email",
+        crate::storage::DIRECTION_OUTBOUND,
+        crate::storage::KIND_CHAT,
+        &crate::storage::outbound_tag("email", body),
+    ) {
+        tracing::warn!(
+            "Failed to append outbound email to thread {}: {}",
+            counterparty,
+            e
+        );
+    }
+
     tracing::info!("Email sent to {}", recipient);
 
     Ok(())
@@ -95,6 +115,7 @@ pub async fn send_email(
 pub async fn send_email_with_db(
     db_path: &std::path::Path,
     allowed_senders: &[String],
+    owner_emails: &[String],
     to: &str,
     vetted_cc: Option<&str>,
     unvetted_cc: Option<&str>,
@@ -140,9 +161,24 @@ pub async fn send_email_with_db(
 
     run_gws_send(&send_body.to_string()).await?;
 
-    // Record contact with a fresh connection (after the await)
+    // Record contact + thread persistence with a fresh connection (after the await).
     let storage = Storage::open(db_path)?;
     storage.add_contact(&recipient)?;
+
+    let counterparty = crate::counterparty::email_counterparty(&recipient, owner_emails);
+    if let Err(e) = storage.append_message(
+        &counterparty,
+        "email",
+        crate::storage::DIRECTION_OUTBOUND,
+        crate::storage::KIND_CHAT,
+        &crate::storage::outbound_tag("email", body),
+    ) {
+        tracing::warn!(
+            "Failed to append outbound email to thread {}: {}",
+            counterparty,
+            e
+        );
+    }
 
     tracing::info!("Email sent to {}", recipient);
 

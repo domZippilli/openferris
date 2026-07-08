@@ -47,6 +47,14 @@ pub struct UserConfig {
     #[serde(default = "default_timezone")]
     pub timezone: String,
     pub zip_code: Option<String>,
+    /// The owner's email address(es), used to resolve the per-counterparty
+    /// message thread (storage.rs) for inbound/outbound email: mail to/from
+    /// one of these addresses lands in the shared "owner" thread rather than
+    /// a per-address "email:<addr>" thread. Deliberately separate from
+    /// `[gmail].allowed_senders`, which may include non-owner senders
+    /// authorized to email the agent but who aren't the owner.
+    #[serde(default)]
+    pub emails: Vec<String>,
 }
 
 fn default_timezone() -> String {
