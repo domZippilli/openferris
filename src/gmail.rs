@@ -24,6 +24,11 @@ const THREAD_MSG_BODY_LEN: usize = 1500;
 /// context size on long threads; the agent compacts in-run as a further guard.
 const THREAD_MAX_PRIOR_MSGS: usize = 10;
 
+/// Timeout for a single `gws` subprocess invocation. Mirrors GWS_TIMEOUT in
+/// src/tools/gws.rs — without this, a hung `gws` process wedges the Gmail
+/// poll loop forever.
+const GWS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 // --- Persistent state ---
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -53,13 +58,33 @@ impl GmailState {
         self.thread_reply_timestamps.retain(|_, ts| *ts > cutoff);
 
         let path = Self::path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                "Failed to create Gmail state directory {}: {:#}",
+                parent.display(),
+                e
+            );
         }
         let tmp = path.with_extension("json.tmp");
-        if let Ok(data) = serde_json::to_string_pretty(self) {
-            if std::fs::write(&tmp, &data).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
+        match serde_json::to_string_pretty(self) {
+            Ok(data) => match std::fs::write(&tmp, &data) {
+                Ok(()) => {
+                    if let Err(e) = std::fs::rename(&tmp, &path) {
+                        tracing::warn!(
+                            "Failed to persist Gmail state to {}: {:#}",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to write Gmail state to {}: {:#}", tmp.display(), e);
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Failed to serialize Gmail state: {:#}", e);
             }
         }
     }
@@ -91,15 +116,36 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
 
     tracing::info!("Gmail listener starting...");
 
-    // Get our email address and seed history ID if needed
-    let profile = run_gws(&[
-        "gmail",
-        "users",
-        "getProfile",
-        "--params",
-        &format!(r#"{{"userId":"me"}}"#),
-    ])
-    .await?;
+    let auth_backoff = std::time::Duration::from_secs(300); // 5 min backoff on auth errors
+
+    // Get our email address and seed history ID if needed. Auth errors here
+    // are retried with the same backoff as the poll loop below — otherwise
+    // expired auth at boot would propagate via `?` and permanently kill the
+    // listener process instead of waiting for re-authentication.
+    let mut auth_failed_at_startup = false;
+    let profile = loop {
+        match run_gws(&[
+            "gmail",
+            "users",
+            "getProfile",
+            "--params",
+            r#"{"userId":"me"}"#,
+        ])
+        .await
+        {
+            Ok(profile) => break profile,
+            Err(e) if is_auth_error(&e) => {
+                if !auth_failed_at_startup {
+                    tracing::error!(
+                        "Gmail authentication expired at startup. Run `gws auth login` to re-authenticate."
+                    );
+                    auth_failed_at_startup = true;
+                }
+                tokio::time::sleep(auth_backoff).await;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let our_email = profile
         .get("emailAddress")
         .and_then(|v| v.as_str())
@@ -127,7 +173,6 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
     }
 
     let poll_interval = std::time::Duration::from_secs(gmail_config.poll_interval_secs);
-    let auth_backoff = std::time::Duration::from_secs(300); // 5 min backoff on auth errors
     let mut auth_failed = false;
 
     loop {
@@ -140,11 +185,7 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
         )
         .await
         {
-            let err_str = format!("{:#}", e);
-            if err_str.contains("401")
-                || err_str.contains("authError")
-                || err_str.contains("invalid_grant")
-            {
+            if is_auth_error(&e) {
                 if !auth_failed {
                     tracing::error!(
                         "Gmail authentication expired. Run `gws auth login` to re-authenticate."
@@ -161,6 +202,14 @@ pub async fn run(daemon_address: String, gmail_config: GmailConfig) -> Result<()
         }
         tokio::time::sleep(poll_interval).await;
     }
+}
+
+/// Whether `e` looks like an expired/invalid Gmail auth error (as opposed to a
+/// transient or unrelated failure). Used to trigger the auth backoff instead
+/// of a normal error log, both at startup and in the poll loop.
+fn is_auth_error(e: &anyhow::Error) -> bool {
+    let err_str = format!("{:#}", e);
+    err_str.contains("401") || err_str.contains("authError") || err_str.contains("invalid_grant")
 }
 
 async fn poll_once(
@@ -611,11 +660,16 @@ fn truncate_chars(s: &str, max: usize) -> String {
 }
 
 async fn run_gws(args: &[&str]) -> Result<serde_json::Value> {
-    let output = tokio::process::Command::new("gws")
-        .args(args)
-        .output()
-        .await
-        .context("Failed to run gws")?;
+    let output = tokio::time::timeout(
+        GWS_TIMEOUT,
+        tokio::process::Command::new("gws")
+            .args(args)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("gws timed out after {:?}", GWS_TIMEOUT))?
+    .context("Failed to run gws")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
