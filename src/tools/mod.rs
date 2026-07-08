@@ -97,7 +97,7 @@ impl ToolRegistry {
             config.fetch.allowed_local_ports.clone(),
         )));
         self.register(Box::new(schedule::ScheduleTool));
-        self.register(Box::new(gws::GwsTool));
+        self.register(Box::new(gws::GwsTool::new(config.gws.clone())));
         self.register(Box::new(gws::GwsDriveDownloadFileTool));
         self.register(Box::new(gws::GwsDriveDownloadFileToPathTool::new(
             allowed_dirs.clone(),

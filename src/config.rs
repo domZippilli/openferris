@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub files: FilesConfig,
     #[serde(default)]
     pub fetch: FetchConfig,
+    #[serde(default)]
+    pub gws: GwsConfig,
     pub search: Option<SearchConfig>,
     pub firecrawl: Option<FirecrawlConfig>,
     pub camoufox: Option<CamoufoxConfig>,
@@ -155,6 +157,14 @@ pub struct FetchConfig {
     /// reaching one of these ports is allowed.
     #[serde(default)]
     pub allowed_local_ports: Vec<u16>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct GwsConfig {
+    /// Allow the generic gws tool to run `drive files delete` and
+    /// `drive files trash`. Other destructive Workspace operations stay blocked.
+    #[serde(default)]
+    pub allow_drive_file_deletes: bool,
 }
 
 /// Returns the list of directories the agent may read/write,

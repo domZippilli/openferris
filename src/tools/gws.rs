@@ -6,6 +6,8 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::config::GwsConfig;
+
 use super::{Tool, files};
 
 /// Denied method verbs — these are destructive or send outbound messages.
@@ -25,7 +27,9 @@ const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/tiff",
 ];
 
-pub struct GwsTool;
+pub struct GwsTool {
+    config: GwsConfig,
+}
 pub struct GwsDriveDownloadFileTool;
 pub struct GwsDriveDownloadFileToPathTool {
     allowed_dirs: Vec<PathBuf>,
@@ -34,6 +38,12 @@ pub struct GwsDriveDownloadFileToPathTool {
 impl GwsDriveDownloadFileToPathTool {
     pub fn new(allowed_dirs: Vec<PathBuf>) -> Self {
         Self { allowed_dirs }
+    }
+}
+
+impl GwsTool {
+    pub fn new(config: GwsConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -78,7 +88,14 @@ fn shell_split(input: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
-fn is_allowed(args: &[&str]) -> Result<()> {
+fn is_drive_file_delete(args: &[&str], method: &str) -> bool {
+    args.len() >= 3
+        && args[0].eq_ignore_ascii_case("drive")
+        && args[1].eq_ignore_ascii_case("files")
+        && args[2].eq_ignore_ascii_case(method)
+}
+
+fn is_allowed(args: &[&str], config: &GwsConfig) -> Result<()> {
     if args.is_empty() {
         bail!("No command provided");
     }
@@ -97,8 +114,14 @@ fn is_allowed(args: &[&str]) -> Result<()> {
         }
         let lower = arg.to_lowercase();
         if DENIED_METHODS.contains(&lower.as_str()) {
+            if config.allow_drive_file_deletes
+                && (lower == "delete" || lower == "trash")
+                && is_drive_file_delete(args, &lower)
+            {
+                continue;
+            }
             bail!(
-                "The '{}' method is not allowed — destructive and outbound operations are blocked",
+                "The '{}' method is not allowed — destructive and outbound operations are blocked unless explicitly configured",
                 arg
             );
         }
@@ -301,7 +324,9 @@ impl Tool for GwsTool {
          {\"command\": \"calendar events list --params '{\\\"calendarId\\\": \\\"primary\\\"}'\"}. \
          Supports Drive, Gmail, Calendar, Sheets, Docs, Chat, Admin, and other Workspace APIs. \
          Returns JSON output. Use 'schema <method>' to inspect request/response schemas. \
-         Note: destructive operations (delete, trash, send, empty, remove) are blocked. Use the send_email tool to send emails."
+         Note: destructive operations (delete, trash, send, empty, remove) are blocked by default. \
+         If [gws].allow_drive_file_deletes is true, Drive file delete/trash commands are allowed. \
+         Use the send_email tool to send emails."
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
@@ -312,7 +337,7 @@ impl Tool for GwsTool {
 
         let args = shell_split(command)?;
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        is_allowed(&arg_refs)?;
+        is_allowed(&arg_refs, &self.config)?;
 
         let mut cmd = tokio::process::Command::new("gws");
         cmd.args(&args).kill_on_drop(true);
@@ -548,28 +573,55 @@ mod tests {
 
     #[test]
     fn test_allowed_read_commands() {
-        assert!(is_allowed(&["drive", "files", "list"]).is_ok());
-        assert!(is_allowed(&["gmail", "users", "messages", "get", "--id=abc"]).is_ok());
-        assert!(is_allowed(&["calendar", "events", "list"]).is_ok());
-        assert!(is_allowed(&["schema", "drive.files.list"]).is_ok());
+        let config = GwsConfig::default();
+        assert!(is_allowed(&["drive", "files", "list"], &config).is_ok());
+        assert!(is_allowed(&["gmail", "users", "messages", "get", "--id=abc"], &config).is_ok());
+        assert!(is_allowed(&["calendar", "events", "list"], &config).is_ok());
+        assert!(is_allowed(&["schema", "drive.files.list"], &config).is_ok());
     }
 
     #[test]
-    fn test_denied_destructive() {
-        assert!(is_allowed(&["drive", "files", "delete", "--file-id=abc"]).is_err());
-        assert!(is_allowed(&["gmail", "users", "messages", "trash", "--id=abc"]).is_err());
-        assert!(is_allowed(&["gmail", "users", "messages", "send"]).is_err());
+    fn test_denied_destructive_by_default() {
+        let config = GwsConfig::default();
+        assert!(is_allowed(&["drive", "files", "delete", "--file-id=abc"], &config).is_err());
+        assert!(
+            is_allowed(
+                &["gmail", "users", "messages", "trash", "--id=abc"],
+                &config
+            )
+            .is_err()
+        );
+        assert!(is_allowed(&["gmail", "users", "messages", "send"], &config).is_err());
+    }
+
+    #[test]
+    fn test_allows_configured_drive_file_deletes_only() {
+        let config = GwsConfig {
+            allow_drive_file_deletes: true,
+        };
+        assert!(is_allowed(&["drive", "files", "delete", "--file-id=abc"], &config).is_ok());
+        assert!(is_allowed(&["drive", "files", "trash", "--file-id=abc"], &config).is_ok());
+        assert!(
+            is_allowed(
+                &["gmail", "users", "messages", "trash", "--id=abc"],
+                &config
+            )
+            .is_err()
+        );
+        assert!(is_allowed(&["gmail", "users", "messages", "send"], &config).is_err());
+        assert!(is_allowed(&["drive", "comments", "delete", "--file-id=abc"], &config).is_err());
     }
 
     #[test]
     fn test_denied_auth() {
-        assert!(is_allowed(&["auth", "login"]).is_err());
-        assert!(is_allowed(&["auth", "setup"]).is_err());
+        let config = GwsConfig::default();
+        assert!(is_allowed(&["auth", "login"], &config).is_err());
+        assert!(is_allowed(&["auth", "setup"], &config).is_err());
     }
 
     #[test]
     fn test_empty_command() {
-        assert!(is_allowed(&[]).is_err());
+        assert!(is_allowed(&[], &GwsConfig::default()).is_err());
     }
 
     #[test]

@@ -223,6 +223,9 @@ enable_thinking = true           # Enable reasoning chat-template mode when supp
 
 [daemon]
 listen = "127.0.0.1:7700"       # TCP address for the daemon
+
+[gws]
+allow_drive_file_deletes = false # Set true to allow `drive files delete/trash`
 ```
 
 `OPENFERRIS_LLM_TEMPERATURE` and `OPENFERRIS_LLM_TOP_K` override the configured
