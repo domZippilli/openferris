@@ -39,7 +39,7 @@ Important: `run_skill` does not deliver results. Delivery tools are disabled ins
 If `run_skill` is not available (single-slot LLM config), read the skill's SKILL.md file and follow its instructions directly using your tools.
 
 Skills are stored at:
-- Bundled skills: you already know these (default, daily-briefing, email-reply, goal-pursuit)
+- Bundled skills: you already know these (default, daily-briefing, email-reply, goal-pursuit, goal-runner)
 - Your custom skills: `~/.local/share/openferris/workspace/skills/<skill-name>/SKILL.md`
 
 ## Workspace

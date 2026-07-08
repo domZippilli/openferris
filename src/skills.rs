@@ -61,6 +61,7 @@ fn get_bundled_skill(name: &str) -> Option<&'static str> {
         "daily-briefing" => Some(include_str!("../skills/daily-briefing/SKILL.md")),
         "email-reply" => Some(include_str!("../skills/email-reply/SKILL.md")),
         "goal-pursuit" => Some(include_str!("../skills/goal-pursuit/SKILL.md")),
+        "goal-runner" => Some(include_str!("../skills/goal-runner/SKILL.md")),
         _ => None,
     }
 }
@@ -111,5 +112,26 @@ mod tests {
         assert_eq!(skill.description, "A test skill");
         assert_eq!(skill.tools, vec!["datetime"]);
         assert_eq!(skill.prompt, "Do the thing.");
+    }
+
+    /// Every bundled skill must parse and its declared name must match the
+    /// registry key it's compiled under, or `load_skill` would silently
+    /// hand callers a mismatched Skill.
+    #[test]
+    fn test_all_bundled_skills_parse() {
+        for name in [
+            "default",
+            "daily-briefing",
+            "email-reply",
+            "goal-pursuit",
+            "goal-runner",
+        ] {
+            let content = get_bundled_skill(name).unwrap_or_else(|| {
+                panic!("bundled skill '{}' missing from get_bundled_skill", name)
+            });
+            let skill = load_skill_from_str(content)
+                .unwrap_or_else(|e| panic!("bundled skill '{}' failed to parse: {}", name, e));
+            assert_eq!(skill.name, name, "bundled skill frontmatter name mismatch");
+        }
     }
 }

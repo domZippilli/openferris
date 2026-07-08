@@ -116,3 +116,42 @@ If a previous entry exists for today, append to it rather than overwriting.
 1. User skills: `~/.config/openferris/skills/<name>/SKILL.md`
 2. Workspace skills: `~/.local/share/openferris/workspace/skills/<name>/SKILL.md`
 3. Bundled skills (compiled into the binary)
+
+## Goals
+
+Goals (from `/goal` or `openferris goal`) persist as files at `~/.local/share/openferris/workspace/goals/<slug>.md`, not just as an in-flight request. The file is the source of truth; the `goal-pursuit` and `goal-runner` skills read and rewrite it directly with `read_file`/`write_file` — there's no separate database record or parser to keep in sync.
+
+### File format
+
+```markdown
+---
+status: active | done | abandoned
+created: <date>
+next_check: <YYYY-MM-DD HH:MM or "none">
+---
+# Goal: <one-line goal>
+## Exit criteria
+...
+## Plan
+...
+## Progress log
+- <date>: what happened, what was learned, what's next
+```
+
+### Lifecycle
+
+- **active** — still being worked. Paired with `next_check`, which controls when it's next looked at:
+  - a future timestamp: come back and work it once that time has passed.
+  - `none`: paused mid-run only — never leave a goal this way at the end of a run, or it's skipped forever.
+- **done** — exit criteria satisfied.
+- **abandoned** — no further action is possible or useful; the progress log says why.
+
+### goal-runner cadence
+
+`goal-pursuit` handles interactive `/goal` runs (bounded by a turn limit, in real time). `goal-runner` is the unattended heartbeat: on a cron cadence, it lists `goals/`, and for every `active` goal whose `next_check` is due, it picks up where the file left off, does the work, and rewrites the file again — messaging the owner only when something is actually worth reporting. Schedule it once with:
+
+```
+openferris schedule add goal-runner "0 */2 * * *"
+```
+
+(every 2 hours; adjust the cron expression to taste). This is what makes "I'll check back tomorrow" a real mechanism instead of an empty promise.
