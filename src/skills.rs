@@ -21,7 +21,7 @@ struct SkillFrontmatter {
 pub fn load_skill_from_str(content: &str) -> Result<Skill> {
     let (frontmatter, body) = parse_frontmatter(content)?;
     let meta: SkillFrontmatter =
-        serde_yaml::from_str(&frontmatter).context("Failed to parse skill frontmatter")?;
+        serde_yaml_ng::from_str(&frontmatter).context("Failed to parse skill frontmatter")?;
 
     Ok(Skill {
         name: meta.name,
