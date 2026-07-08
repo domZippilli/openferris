@@ -48,11 +48,24 @@ impl ToolRegistry {
 
     /// Get tool descriptions filtered by the skill's allowlist (tool sieve)
     pub fn get_descriptions(&self, allowed: &[String]) -> Vec<(&str, &str)> {
-        self.tools
+        for name in allowed {
+            if !self.tools.contains_key(name) {
+                tracing::warn!(
+                    "Skill allowlist references unknown tool '{}' — it will be silently dropped \
+                     (check for typos or workspace-skill names that aren't registered tools)",
+                    name
+                );
+            }
+        }
+
+        let mut descriptions: Vec<(&str, &str)> = self
+            .tools
             .values()
             .filter(|t| allowed.contains(&t.name().to_string()))
             .map(|t| (t.name(), t.description_for_llm()))
-            .collect()
+            .collect();
+        descriptions.sort_by_key(|(name, _)| *name);
+        descriptions
     }
 
     /// Notify all tools that a new agent run is starting. Tools holding

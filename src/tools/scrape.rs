@@ -54,7 +54,7 @@ impl Tool for ScrapeUrlTool {
          Handles JavaScript-rendered pages, removes nav/chrome/ads. Returns markdown \
          (truncated at 50KB). Use this for general web pages where you want article content. \
          For simple/known endpoints (RSS, JSON APIs, your wiki) use fetch_url instead — \
-         it's faster. For sites with aggressive bot detection, stealth_fetch (coming) will be \
+         it's faster. For sites with aggressive bot detection, stealth_fetch is \
          the next escalation."
     }
 

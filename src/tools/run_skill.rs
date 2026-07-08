@@ -51,7 +51,7 @@ impl Tool for RunSkillTool {
     fn description_for_llm(&self) -> &str {
         "Run a skill as a subagent. The skill runs with its own context and tools, and returns the result as text. \
          Parameters: {\"skill_name\": \"<name>\", \"context\": \"<optional extra instructions or data>\"}. \
-         Use this to delegate tasks to specialized skills like headline-scrape, daily-briefing, etc. \
+         Use this to delegate tasks to specialized skills like daily-briefing, email-reply, etc. \
          The subagent does the work (fetching, parsing, formatting) and returns the result to you. \
          Delivery tools are disabled inside the subagent: run_skill itself never sends email, Telegram messages, or other external delivery, even if the delegated skill normally would. \
          If the result needs to be delivered, you must explicitly call send_email, send_telegram, or another delivery tool yourself after run_skill returns. \
