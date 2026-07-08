@@ -163,6 +163,23 @@ fn binary_path() -> String {
         .unwrap_or_else(|_| "openferris".to_string())
 }
 
+/// Extract the skill name from a crontab line's `# openferris: <name>` marker,
+/// if present. The marker must be found and the remainder of the line after
+/// it (trimmed) is treated as the skill name.
+fn marker_skill_name(line: &str) -> Option<&str> {
+    line.find(CRON_MARKER)
+        .map(|pos| line[pos + CRON_MARKER.len()..].trim())
+}
+
+/// Whether a crontab line is an openferris entry for exactly `skill_name`.
+///
+/// This compares the full marker remainder for equality rather than doing a
+/// substring/prefix match, so a skill named "daily" does not match a line
+/// marked for "daily-briefing" (or vice versa).
+fn line_matches_skill(line: &str, skill_name: &str) -> bool {
+    marker_skill_name(line) == Some(skill_name)
+}
+
 pub fn add(skill_name: &str, cron_expr: &str) -> Result<String> {
     validate_skill_name(skill_name)?;
     validate_cron_expr(cron_expr)?;
@@ -171,7 +188,7 @@ pub fn add(skill_name: &str, cron_expr: &str) -> Result<String> {
     let marker = format!("{} {}", CRON_MARKER, skill_name);
 
     // Check if already scheduled
-    if crontab.lines().any(|l| l.contains(&marker)) {
+    if crontab.lines().any(|l| line_matches_skill(l, skill_name)) {
         anyhow::bail!(
             "Skill '{}' is already scheduled. Remove it first.",
             skill_name
@@ -199,7 +216,7 @@ pub async fn add_async(skill_name: &str, cron_expr: &str) -> Result<String> {
     let mut crontab = read_crontab_async().await?;
     let marker = format!("{} {}", CRON_MARKER, skill_name);
 
-    if crontab.lines().any(|l| l.contains(&marker)) {
+    if crontab.lines().any(|l| line_matches_skill(l, skill_name)) {
         anyhow::bail!(
             "Skill '{}' is already scheduled. Remove it first.",
             skill_name
@@ -243,11 +260,9 @@ pub async fn remove_async(skill_name: &str) -> Result<String> {
 }
 
 fn crontab_without_skill(skill_name: &str, crontab: &str) -> Option<String> {
-    let marker = format!("{} {}", CRON_MARKER, skill_name);
-
     let new_crontab: String = crontab
         .lines()
-        .filter(|l| !l.contains(&marker))
+        .filter(|l| !line_matches_skill(l, skill_name))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -391,6 +406,36 @@ mod tests {
     #[test]
     fn remove_crontab_entry_returns_none_when_absent() {
         assert!(crontab_without_skill("missing", "0 7 * * * /bin/echo keep\n").is_none());
+    }
+
+    #[test]
+    fn remove_crontab_entry_does_not_remove_prefix_collision() {
+        // Removing "daily" must not also remove a "daily-briefing" entry just
+        // because its marker starts with the same prefix.
+        let crontab = "\
+0 7 * * * /usr/bin/openferris run daily-briefing # openferris: daily-briefing
+0 8 * * * /usr/bin/openferris run daily # openferris: daily
+30 9 * * 1 /bin/echo keep
+";
+
+        let updated = crontab_without_skill("daily", crontab).unwrap();
+
+        assert_eq!(
+            updated,
+            "0 7 * * * /usr/bin/openferris run daily-briefing # openferris: daily-briefing\n\
+             30 9 * * 1 /bin/echo keep\n"
+        );
+    }
+
+    #[test]
+    fn line_matches_skill_does_not_match_prefix_collision() {
+        // The "already scheduled" check in `add`/`add_async` relies on this
+        // helper; it must not report "daily" as matching a "daily-briefing"
+        // entry.
+        let line = "0 8 * * * /usr/bin/openferris run daily-briefing # openferris: daily-briefing";
+
+        assert!(!line_matches_skill(line, "daily"));
+        assert!(line_matches_skill(line, "daily-briefing"));
     }
 
     #[test]
