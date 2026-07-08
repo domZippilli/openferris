@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 
-use openferris::agent::{Agent, AgentResult};
+use openferris::agent::{Agent, AgentResult, PromptContext};
 use openferris::config::{self, AppConfig};
 use openferris::counterparty;
 use openferris::llm::{ChatMessage, Role};
@@ -288,14 +288,17 @@ async fn run_with_wakeup_tick(
 
             // Async: run agent
             let progress_tx = queued.progress_tx.clone();
+            let prompt_ctx = PromptContext {
+                identity: &identity,
+                user_profile: &user_profile,
+                persistent_context: &persistent_context,
+            };
             let (response, log_data) = process_request(
                 &worker_agent,
                 &queued,
                 &history,
                 &user_skills_dir,
-                &identity,
-                &user_profile,
-                &persistent_context,
+                prompt_ctx,
                 progress_tx,
             )
             .await;
@@ -600,16 +603,55 @@ async fn write_response(
     Ok(())
 }
 
+/// Build an error `DaemonResponse` (with no log data) for `request_id`. Used
+/// by every `process_request` branch's failure path so the error shape stays
+/// identical regardless of which stage (skill load, agent run, goal pursuit)
+/// produced it.
+fn err_resp(request_id: String, e: anyhow::Error) -> (DaemonResponse, Option<LogData>) {
+    (
+        DaemonResponse {
+            request_id,
+            kind: ResponseKind::Error {
+                message: format!("{:#}", e),
+            },
+        },
+        None,
+    )
+}
+
+/// Build a `Done` `DaemonResponse` plus the matching [`LogData`] for a
+/// successful agent run. Used by every `process_request` branch's success
+/// path.
+fn done_resp(
+    request_id: String,
+    source: String,
+    skill: Option<String>,
+    user_message: String,
+    result: AgentResult,
+) -> (DaemonResponse, Option<LogData>) {
+    let response = DaemonResponse {
+        request_id,
+        kind: ResponseKind::Done {
+            text: result.response.clone(),
+        },
+    };
+    let log = LogData {
+        source,
+        skill,
+        user_message,
+        result,
+    };
+    (response, Some(log))
+}
+
 /// Run the agent and return (response for client, optional log data for storage).
-/// Takes `persistent_context` as a pre-built String so storage isn't held across .await.
+/// `prompt.persistent_context` is a pre-built String so storage isn't held across .await.
 async fn process_request(
     agent: &Agent,
     queued: &QueuedRequest,
     history: &[ChatMessage],
     user_skills_dir: &std::path::Path,
-    identity: &str,
-    user_profile: &str,
-    persistent_context: &str,
+    prompt: PromptContext<'_>,
     progress_tx: mpsc::UnboundedSender<AgentNotification>,
 ) -> (DaemonResponse, Option<LogData>) {
     let request_id = queued.request.id.clone();
@@ -623,163 +665,64 @@ async fn process_request(
         RequestKind::RunSkill {
             skill_name,
             context,
-        } => match skills::load_skill(skill_name, user_skills_dir) {
-            Ok(skill) => {
-                let msg = match context {
-                    Some(ctx) => format!("Execute the {} skill now.\n\n{}", skill_name, ctx),
-                    None => format!("Execute the {} skill now.", skill_name),
-                };
-                match agent
-                    .run(
-                        &skill,
-                        &msg,
-                        &[],
-                        identity,
-                        user_profile,
-                        persistent_context,
-                        Some(progress_tx.clone()),
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        let log = LogData {
-                            source,
-                            skill: Some(skill_name.clone()),
-                            user_message: msg,
-                            result: result.clone(),
-                        };
-                        let response = DaemonResponse {
-                            request_id,
-                            kind: ResponseKind::Done {
-                                text: result.response,
-                            },
-                        };
-                        (response, Some(log))
-                    }
-                    Err(e) => (
-                        DaemonResponse {
-                            request_id,
-                            kind: ResponseKind::Error {
-                                message: format!("{:#}", e),
-                            },
-                        },
-                        None,
-                    ),
-                }
+        } => {
+            let skill = match skills::load_skill(skill_name, user_skills_dir) {
+                Ok(skill) => skill,
+                Err(e) => return err_resp(request_id, e),
+            };
+            let msg = match context {
+                Some(ctx) => format!("Execute the {} skill now.\n\n{}", skill_name, ctx),
+                None => format!("Execute the {} skill now.", skill_name),
+            };
+            match agent
+                .run(&skill, &msg, &[], prompt, Some(progress_tx.clone()))
+                .await
+            {
+                Ok(result) => done_resp(request_id, source, Some(skill_name.clone()), msg, result),
+                Err(e) => err_resp(request_id, e),
             }
-            Err(e) => (
-                DaemonResponse {
-                    request_id,
-                    kind: ResponseKind::Error {
-                        message: format!("{:#}", e),
-                    },
-                },
-                None,
-            ),
-        },
+        }
         RequestKind::FreeformMessage { text } => {
-            match skills::load_skill("default", user_skills_dir) {
-                Ok(skill) => {
-                    match agent
-                        .run(
-                            &skill,
-                            text,
-                            history,
-                            identity,
-                            user_profile,
-                            persistent_context,
-                            Some(progress_tx.clone()),
-                        )
-                        .await
-                    {
-                        Ok(result) => {
-                            let log = LogData {
-                                source,
-                                skill: None,
-                                user_message: text.clone(),
-                                result: result.clone(),
-                            };
-                            let response = DaemonResponse {
-                                request_id,
-                                kind: ResponseKind::Done {
-                                    text: result.response,
-                                },
-                            };
-                            (response, Some(log))
-                        }
-                        Err(e) => (
-                            DaemonResponse {
-                                request_id,
-                                kind: ResponseKind::Error {
-                                    message: format!("{:#}", e),
-                                },
-                            },
-                            None,
-                        ),
-                    }
-                }
-                Err(e) => (
-                    DaemonResponse {
-                        request_id,
-                        kind: ResponseKind::Error {
-                            message: format!("{:#}", e),
-                        },
-                    },
-                    None,
-                ),
+            let skill = match skills::load_skill("default", user_skills_dir) {
+                Ok(skill) => skill,
+                Err(e) => return err_resp(request_id, e),
+            };
+            match agent
+                .run(&skill, text, history, prompt, Some(progress_tx.clone()))
+                .await
+            {
+                Ok(result) => done_resp(request_id, source, None, text.clone(), result),
+                Err(e) => err_resp(request_id, e),
             }
         }
         RequestKind::PursueGoal {
             exit_criteria,
             max_turns,
-        } => match skills::load_skill(GOAL_SKILL_NAME, user_skills_dir) {
-            Ok(skill) => match pursue_goal(
+        } => {
+            let skill = match skills::load_skill(GOAL_SKILL_NAME, user_skills_dir) {
+                Ok(skill) => skill,
+                Err(e) => return err_resp(request_id, e),
+            };
+            match pursue_goal(
                 agent,
                 &skill,
                 exit_criteria,
                 *max_turns,
-                identity,
-                user_profile,
-                persistent_context,
+                prompt,
                 progress_tx.clone(),
             )
             .await
             {
-                Ok(result) => {
-                    let log = LogData {
-                        source,
-                        skill: Some(GOAL_SKILL_NAME.to_string()),
-                        user_message: format!("Pursue goal with exit criteria: {}", exit_criteria),
-                        result: result.clone(),
-                    };
-                    let response = DaemonResponse {
-                        request_id,
-                        kind: ResponseKind::Done {
-                            text: result.response,
-                        },
-                    };
-                    (response, Some(log))
-                }
-                Err(e) => (
-                    DaemonResponse {
-                        request_id,
-                        kind: ResponseKind::Error {
-                            message: format!("{:#}", e),
-                        },
-                    },
-                    None,
-                ),
-            },
-            Err(e) => (
-                DaemonResponse {
+                Ok(result) => done_resp(
                     request_id,
-                    kind: ResponseKind::Error {
-                        message: format!("{:#}", e),
-                    },
-                },
-                None,
-            ),
-        },
+                    source,
+                    Some(GOAL_SKILL_NAME.to_string()),
+                    format!("Pursue goal with exit criteria: {}", exit_criteria),
+                    result,
+                ),
+                Err(e) => err_resp(request_id, e),
+            }
+        }
         // StoreMemory is handled directly in the worker loop above.
         RequestKind::StoreMemory { .. } => unreachable!(),
     }
@@ -790,9 +733,7 @@ async fn pursue_goal(
     skill: &openferris::skills::Skill,
     exit_criteria: &str,
     requested_max_turns: usize,
-    identity: &str,
-    user_profile: &str,
-    persistent_context: &str,
+    prompt_ctx: PromptContext<'_>,
     progress_tx: mpsc::UnboundedSender<AgentNotification>,
 ) -> Result<AgentResult> {
     if requested_max_turns == 0 || requested_max_turns > GOAL_MAX_TURNS_HARD {
@@ -834,15 +775,7 @@ async fn pursue_goal(
         // working state, and TUI clients suppress the final Done text once any
         // AssistantChunk has rendered.
         let result = agent
-            .run(
-                skill,
-                &prompt,
-                &history,
-                identity,
-                user_profile,
-                persistent_context,
-                None,
-            )
+            .run(skill, &prompt, &history, prompt_ctx, None)
             .await?;
 
         final_memories.extend(result.memories);
@@ -1360,9 +1293,11 @@ mod tests {
             &skill,
             "Send the owner a confirmation email.",
             5,
-            "",
-            "",
-            "",
+            PromptContext {
+                identity: "",
+                user_profile: "",
+                persistent_context: "",
+            },
             progress_tx,
         )
         .await
@@ -1420,9 +1355,20 @@ mod tests {
         let skill = test_goal_skill();
         let (progress_tx, _progress_rx) = mpsc::unbounded_channel::<AgentNotification>();
 
-        let result = pursue_goal(&agent, &skill, "Do the thing.", 5, "", "", "", progress_tx)
-            .await
-            .unwrap();
+        let result = pursue_goal(
+            &agent,
+            &skill,
+            "Do the thing.",
+            5,
+            PromptContext {
+                identity: "",
+                user_profile: "",
+                persistent_context: "",
+            },
+            progress_tx,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             mock.call_count(),

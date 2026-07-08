@@ -4,11 +4,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::storage::Storage;
 
-/// Send an email via gws, checking the `to` recipient against the allowed
-/// senders config list and the known_contacts table in SQLite.
-///
-/// If `allowed_senders` is empty, all recipients are allowed.
-/// After sending, the `to` recipient is recorded as a known contact.
+/// The message-specific fields of an outbound email, bundled to keep
+/// [`send_email`]/[`send_email_with_db`] under clippy's argument-count limit.
 ///
 /// `cc` is split into two trust tiers:
 /// - `vetted_cc`: addresses the caller has already approved through its own
@@ -21,151 +18,147 @@ use crate::storage::Storage;
 /// - `unvetted_cc`: addresses supplied directly by a caller that has not
 ///   done its own vetting (e.g. a model/tool-call parameter). These are
 ///   authorized against the allowlist/known-contacts exactly like `to`.
+pub struct OutboundEmail<'a> {
+    pub to: &'a str,
+    pub vetted_cc: Option<&'a str>,
+    pub unvetted_cc: Option<&'a str>,
+    pub subject: &'a str,
+    pub body: &'a str,
+    pub in_reply_to: Option<&'a str>,
+    pub references: Option<&'a str>,
+    pub thread_id: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+}
+
+/// Send an email via gws, checking the `to` recipient against the allowed
+/// senders config list and the known_contacts table in SQLite.
+///
+/// If `allowed_senders` is empty, all recipients are allowed.
+/// After sending, the `to` recipient is recorded as a known contact.
 pub async fn send_email(
     storage: &Storage,
     allowed_senders: &[String],
     owner_emails: &[String],
     from: Option<&str>,
-    to: &str,
-    vetted_cc: Option<&str>,
-    unvetted_cc: Option<&str>,
-    subject: &str,
-    body: &str,
-    in_reply_to: Option<&str>,
-    references: Option<&str>,
-    thread_id: Option<&str>,
-    content_type: Option<&str>,
+    msg: OutboundEmail<'_>,
 ) -> Result<()> {
-    let recipient = parse_email_address(to);
+    let recipient = parse_email_address(msg.to);
 
-    // Check authorization: config allowlist OR known contact
     if !allowed_senders.is_empty() {
-        let in_allowlist = allowed_senders
-            .iter()
-            .any(|s| s.to_lowercase() == recipient);
-        let is_known = storage.is_contact(&recipient)?;
-
-        if !in_allowlist && !is_known {
-            bail!(
-                "Recipient '{}' is not in the allowed senders list or known contacts",
-                recipient
-            );
-        }
-
-        authorize_cc(unvetted_cc, allowed_senders, storage)?;
+        authorize_recipient(&recipient, msg.unvetted_cc, allowed_senders, storage)?;
     }
 
-    let cc = merge_cc(vetted_cc, normalize_cc(unvetted_cc).as_deref());
+    let send_body = build_send_body(from, &recipient, &msg);
+    run_gws_send(&send_body).await?;
 
-    // Compose RFC 2822. The To header uses the parsed, authorized address —
-    // never the raw `to` string, which for "Name <addr>, extra@evil" would
-    // smuggle an unauthorized recipient past the single-address check above.
-    let raw = compose_raw(
-        from,
-        &recipient,
-        cc.as_deref(),
-        subject,
-        body,
-        in_reply_to,
-        references,
-        content_type,
-    );
-    let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
-
-    let mut send_body = serde_json::json!({ "raw": encoded });
-    if let Some(tid) = thread_id {
-        send_body["threadId"] = serde_json::json!(tid);
-    }
-
-    // Send the email (async — do all Storage work before/after this)
-    let json_str = send_body.to_string();
-    run_gws_send(&json_str).await?;
-
-    // Record the recipient as a known contact
-    storage.add_contact(&recipient)?;
-
-    // Thread persistence: the recipient's counterparty thread gets this send
-    // as an outbound chat turn (owner email -> the shared "owner" thread;
-    // anyone else -> their own "email:<addr>" thread). Best-effort: a logging
-    // failure shouldn't fail a send that already went out.
-    let counterparty = crate::counterparty::email_counterparty(&recipient, owner_emails);
-    if let Err(e) = storage.append_message(
-        &counterparty,
-        "email",
-        crate::storage::DIRECTION_OUTBOUND,
-        crate::storage::KIND_CHAT,
-        &crate::storage::outbound_tag("email", body),
-    ) {
-        tracing::warn!(
-            "Failed to append outbound email to thread {}: {}",
-            counterparty,
-            e
-        );
-    }
-
-    tracing::info!("Email sent to {}", recipient);
-
-    Ok(())
+    record_sent(storage, &recipient, owner_emails, msg.body)
 }
 
-/// Non-async version for use in tool contexts where Storage isn't Send.
-/// Opens its own DB connection, checks contacts, sends, records contact.
+/// For use in tool contexts (`SendEmailTool::execute`), which need their own
+/// short-lived DB connections rather than a `Storage` borrowed from the
+/// caller: `Storage` wraps a `rusqlite::Connection`, which is `Send` but not
+/// `Sync`, so `&Storage` is not `Send` — and `#[async_trait]`'s default
+/// `Tool` trait requires every tool's future to be `Send`. Holding a
+/// `&Storage` across the `run_gws_send().await` below (the way [`send_email`]
+/// does, since its caller isn't Send-bound) would make this fn's future
+/// `!Send` too. So authorization opens (and drops) its own connection before
+/// the await, and recording the send after the await opens a fresh one — same
+/// authorize/compose/send/record sequence as `send_email`, just split across
+/// the await point.
 ///
-/// See [`send_email`] for the `vetted_cc`/`unvetted_cc` trust split.
+/// See [`send_email`]/[`OutboundEmail`] for the `vetted_cc`/`unvetted_cc`
+/// trust split. `from` is always `None` here — gws fills in the
+/// authenticated account's address.
 pub async fn send_email_with_db(
     db_path: &std::path::Path,
     allowed_senders: &[String],
     owner_emails: &[String],
-    to: &str,
-    vetted_cc: Option<&str>,
-    unvetted_cc: Option<&str>,
-    subject: &str,
-    body: &str,
-    content_type: Option<&str>,
+    msg: OutboundEmail<'_>,
 ) -> Result<()> {
-    let recipient = parse_email_address(to);
+    let recipient = parse_email_address(msg.to);
 
-    // Check authorization with a short-lived Storage connection
     if !allowed_senders.is_empty() {
         let storage = Storage::open(db_path)?;
-        let in_allowlist = allowed_senders
-            .iter()
-            .any(|s| s.to_lowercase() == recipient);
-        let is_known = storage.is_contact(&recipient)?;
-
-        if !in_allowlist && !is_known {
-            bail!(
-                "Recipient '{}' is not in the allowed senders list or known contacts",
-                recipient
-            );
-        }
-
-        authorize_cc(unvetted_cc, allowed_senders, &storage)?;
+        authorize_recipient(&recipient, msg.unvetted_cc, allowed_senders, &storage)?;
     }
 
-    let cc = merge_cc(vetted_cc, normalize_cc(unvetted_cc).as_deref());
+    let send_body = build_send_body(None, &recipient, &msg);
+    run_gws_send(&send_body).await?;
 
-    // See send_email: the To header must use the parsed, authorized address.
+    let storage = Storage::open(db_path)?;
+    record_sent(&storage, &recipient, owner_emails, msg.body)
+}
+
+/// Check a `to` recipient against the allowed-senders config list or the
+/// known_contacts table, then run the same check over every address in
+/// `unvetted_cc`. Callers only invoke this when `allowed_senders` is
+/// non-empty (an empty allowlist means "everyone is allowed").
+fn authorize_recipient(
+    recipient: &str,
+    unvetted_cc: Option<&str>,
+    allowed_senders: &[String],
+    storage: &Storage,
+) -> Result<()> {
+    let in_allowlist = allowed_senders
+        .iter()
+        .any(|s| s.to_lowercase() == recipient);
+    let is_known = storage.is_contact(recipient)?;
+
+    if !in_allowlist && !is_known {
+        bail!(
+            "Recipient '{}' is not in the allowed senders list or known contacts",
+            recipient
+        );
+    }
+
+    authorize_cc(unvetted_cc, allowed_senders, storage)
+}
+
+/// Compose the RFC 2822 message and base64url-encode it into the JSON body
+/// gws expects, including `threadId` when replying within an existing
+/// thread. The To header uses the parsed, authorized `recipient` — never a
+/// raw `to` string, which for "Name <addr>, extra@evil" would smuggle an
+/// unauthorized recipient past the single-address check in
+/// [`authorize_recipient`].
+fn build_send_body(from: Option<&str>, recipient: &str, msg: &OutboundEmail<'_>) -> String {
+    let cc = merge_cc(msg.vetted_cc, normalize_cc(msg.unvetted_cc).as_deref());
+    let reply = msg.in_reply_to.map(|in_reply_to| ReplyHeaders {
+        in_reply_to,
+        references: msg.references,
+    });
+
     let raw = compose_raw(
-        None,
-        &recipient,
+        from,
+        recipient,
         cc.as_deref(),
-        subject,
-        body,
-        None,
-        None,
-        content_type,
+        msg.subject,
+        msg.body,
+        reply,
+        msg.content_type,
     );
     let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
-    let send_body = serde_json::json!({ "raw": encoded });
 
-    run_gws_send(&send_body.to_string()).await?;
+    let mut send_body = serde_json::json!({ "raw": encoded });
+    if let Some(tid) = msg.thread_id {
+        send_body["threadId"] = serde_json::json!(tid);
+    }
+    send_body.to_string()
+}
 
-    // Record contact + thread persistence with a fresh connection (after the await).
-    let storage = Storage::open(db_path)?;
-    storage.add_contact(&recipient)?;
+/// Record a successful send: mark `recipient` as a known contact and append
+/// the outbound turn to their counterparty thread (owner email -> the shared
+/// "owner" thread; anyone else -> their own "email:<addr>" thread). The
+/// thread-append is best-effort — a logging failure shouldn't fail a send
+/// that already went out.
+fn record_sent(
+    storage: &Storage,
+    recipient: &str,
+    owner_emails: &[String],
+    body: &str,
+) -> Result<()> {
+    storage.add_contact(recipient)?;
 
-    let counterparty = crate::counterparty::email_counterparty(&recipient, owner_emails);
+    let counterparty = crate::counterparty::email_counterparty(recipient, owner_emails);
     if let Err(e) = storage.append_message(
         &counterparty,
         "email",
@@ -262,14 +255,23 @@ fn sanitize_header_value(value: &str) -> String {
     value.replace("\r\n", " ").replace(['\r', '\n'], " ")
 }
 
+/// The `In-Reply-To`/`References` threading headers for a reply. Bundled
+/// into one optional argument so `compose_raw` stays under clippy's
+/// argument-count limit; `references` (when present) extends the prior
+/// thread's References chain, otherwise the chain starts fresh at
+/// `in_reply_to`.
+struct ReplyHeaders<'a> {
+    in_reply_to: &'a str,
+    references: Option<&'a str>,
+}
+
 fn compose_raw(
     from: Option<&str>,
     to: &str,
     cc: Option<&str>,
     subject: &str,
     body: &str,
-    in_reply_to: Option<&str>,
-    references: Option<&str>,
+    reply: Option<ReplyHeaders<'_>>,
     content_type: Option<&str>,
 ) -> String {
     let mut msg = String::new();
@@ -277,24 +279,24 @@ fn compose_raw(
         msg.push_str(&format!("From: {}\r\n", sanitize_header_value(from)));
     }
     msg.push_str(&format!("To: {}\r\n", sanitize_header_value(to)));
-    if let Some(cc) = cc {
-        if !cc.is_empty() {
-            msg.push_str(&format!("Cc: {}\r\n", sanitize_header_value(cc)));
-        }
+    if let Some(cc) = cc
+        && !cc.is_empty()
+    {
+        msg.push_str(&format!("Cc: {}\r\n", sanitize_header_value(cc)));
     }
     msg.push_str(&format!("Subject: {}\r\n", sanitize_header_value(subject)));
 
-    if let Some(irt) = in_reply_to {
-        if !irt.is_empty() {
-            let irt = sanitize_header_value(irt);
-            msg.push_str(&format!("In-Reply-To: {}\r\n", irt));
+    if let Some(reply) = reply
+        && !reply.in_reply_to.is_empty()
+    {
+        let irt = sanitize_header_value(reply.in_reply_to);
+        msg.push_str(&format!("In-Reply-To: {}\r\n", irt));
 
-            let refs = match references {
-                Some(r) if !r.is_empty() => format!("{} {}", sanitize_header_value(r), irt),
-                _ => irt.clone(),
-            };
-            msg.push_str(&format!("References: {}\r\n", refs));
-        }
+        let refs = match reply.references {
+            Some(r) if !r.is_empty() => format!("{} {}", sanitize_header_value(r), irt),
+            _ => irt.clone(),
+        };
+        msg.push_str(&format!("References: {}\r\n", refs));
     }
 
     let ct = content_type.unwrap_or("text/plain");
@@ -327,10 +329,10 @@ async fn run_gws_send(json_body: &str) -> Result<()> {
 }
 
 pub fn parse_email_address(from: &str) -> String {
-    if let Some(start) = from.rfind('<') {
-        if let Some(end) = from[start..].find('>') {
-            return from[start + 1..start + end].to_lowercase();
-        }
+    if let Some(start) = from.rfind('<')
+        && let Some(end) = from[start..].find('>')
+    {
+        return from[start + 1..start + end].to_lowercase();
     }
     from.trim().to_lowercase()
 }
@@ -347,7 +349,6 @@ mod tests {
             None,
             "Hello",
             "Hi there!",
-            None,
             None,
             None,
         );
@@ -371,7 +372,6 @@ mod tests {
             "Hi!",
             None,
             None,
-            None,
         );
 
         assert!(raw.contains("From: me@example.com\r\n"));
@@ -385,7 +385,6 @@ mod tests {
             Some("boss@example.com"),
             "Hello",
             "Hi!",
-            None,
             None,
             None,
         );
@@ -403,8 +402,10 @@ mod tests {
             None,
             "Re: Hello",
             "Thanks!",
-            Some("<abc@mail>"),
-            Some("<prev@mail>"),
+            Some(ReplyHeaders {
+                in_reply_to: "<abc@mail>",
+                references: Some("<prev@mail>"),
+            }),
             None,
         );
 
@@ -420,7 +421,6 @@ mod tests {
             None,
             "Briefing",
             "<h2>Hello</h2><p>World</p>",
-            None,
             None,
             Some("text/html"),
         );
@@ -493,7 +493,6 @@ mod tests {
             None,
             "evil\r\nBcc: attacker@example.com",
             "Hi!",
-            None,
             None,
             None,
         );

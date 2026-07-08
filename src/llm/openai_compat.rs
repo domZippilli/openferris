@@ -31,9 +31,9 @@ pub struct OpenAiCompatBackend {
 }
 
 #[derive(Serialize)]
-struct ChatRequest {
+struct ChatRequest<'a> {
     model: String,
-    messages: Vec<ApiMessage>,
+    messages: Vec<ApiMessage<'a>>,
     /// Pin to a specific llama.cpp slot for KV cache reuse across requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     id_slot: Option<i32>,
@@ -80,10 +80,14 @@ struct StreamDelta {
     reasoning_content: Option<String>,
 }
 
+/// Borrows straight from the caller's `&[ChatMessage]` instead of cloning
+/// every message's full content on every request — serde serializes borrowed
+/// `&str` fields the same as owned `String`s, so this is a pure allocation
+/// saving with no wire-format change.
 #[derive(Serialize)]
-struct ApiMessage {
-    role: String,
-    content: String,
+struct ApiMessage<'a> {
+    role: &'a str,
+    content: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -120,12 +124,14 @@ impl OpenAiCompatBackend {
         enable_thinking: bool,
         slot: i32,
     ) -> Result<Self> {
-        // Chat completions are non-streaming: llama-server is silent on the
-        // wire for the entire generation, so a read_timeout would fire
-        // mid-flight on legit long generations. Use a generous total timeout
-        // instead — long enough that healthy responses finish, short enough
-        // that a runaway/wedged generation eventually fails loudly. Revisit
-        // once streaming is wired up (read_timeout becomes the right tool).
+        // Use a total `timeout` rather than a `read_timeout`: even in the
+        // streaming path, the server can go silent on the wire for a while
+        // between SSE chunks during legitimate long generations (thinking,
+        // long tool-free completions), so a short read_timeout would fire
+        // mid-flight. A generous total timeout is the tool that fits both
+        // paths — long enough that healthy responses (streamed or not)
+        // finish, short enough that a runaway/wedged generation eventually
+        // fails loudly instead of hanging the caller forever.
         let client = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(600))
@@ -148,6 +154,74 @@ impl OpenAiCompatBackend {
         self.enable_thinking.then_some(ChatTemplateKwargs {
             enable_thinking: true,
         })
+    }
+
+    /// Build the shared `ChatRequest` body for both the blocking and
+    /// streaming completion paths; `stream` is the only field that differs
+    /// between callers. Borrows message content straight from `messages`
+    /// rather than cloning it.
+    fn build_request<'a>(&self, messages: &'a [ChatMessage], stream: bool) -> ChatRequest<'a> {
+        let api_messages: Vec<ApiMessage<'a>> = messages
+            .iter()
+            .map(|m| ApiMessage {
+                role: m.role.as_str(),
+                content: m.content.as_str(),
+            })
+            .collect();
+
+        ChatRequest {
+            model: self.model.clone().unwrap_or_else(|| "default".to_string()),
+            messages: api_messages,
+            id_slot: Some(self.slot),
+            max_tokens: None,
+            temperature: self.temperature,
+            top_k: self.top_k,
+            stream,
+            chat_template_kwargs: self.chat_template_kwargs(),
+        }
+    }
+
+    /// POST a built `ChatRequest` to the chat completions endpoint and return
+    /// the raw (status-checked) `reqwest::Response`. A non-2xx status becomes
+    /// an `anyhow::Error` with the response body attached. Stops short of
+    /// consuming the body since the blocking and streaming callers read it
+    /// differently (whole-body JSON parse vs an SSE byte stream).
+    async fn post_chat(&self, request: &ChatRequest<'_>) -> Result<reqwest::Response> {
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.endpoint.trim_end_matches('/')
+        );
+
+        let mut req = self.client.post(&url).json(request);
+        if request.stream {
+            req = req.header("Accept", "text/event-stream");
+        }
+
+        let response = req
+            .send()
+            .await
+            .context("Failed to connect to OpenAI-compatible chat server")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "OpenAI-compatible chat server returned HTTP {}: {}",
+                status,
+                body
+            );
+        }
+
+        Ok(response)
+    }
+}
+
+/// Warn when a completion's `finish_reason` indicates the server truncated
+/// the output at its token cap rather than the model choosing to stop —
+/// shared by the blocking and streaming completion paths.
+fn warn_if_truncated(reason: Option<&str>) {
+    if reason == Some("length") {
+        tracing::warn!("LLM output truncated (finish_reason=length) — response may be incomplete");
     }
 }
 
@@ -177,47 +251,8 @@ struct ModelEntry {
 #[async_trait]
 impl LlmBackend for OpenAiCompatBackend {
     async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
-        let api_messages: Vec<ApiMessage> = messages
-            .iter()
-            .map(|m| ApiMessage {
-                role: m.role.as_str().to_string(),
-                content: m.content.clone(),
-            })
-            .collect();
-
-        let request = ChatRequest {
-            model: self.model.clone().unwrap_or_else(|| "default".to_string()),
-            messages: api_messages,
-            id_slot: Some(self.slot),
-            max_tokens: None,
-            temperature: self.temperature,
-            top_k: self.top_k,
-            stream: false,
-            chat_template_kwargs: self.chat_template_kwargs(),
-        };
-
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.endpoint.trim_end_matches('/')
-        );
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to connect to OpenAI-compatible chat server")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "OpenAI-compatible chat server returned HTTP {}: {}",
-                status,
-                body
-            );
-        }
+        let request = self.build_request(messages, false);
+        let response = self.post_chat(&request).await?;
 
         let chat_response: ChatResponse = response
             .json()
@@ -230,13 +265,7 @@ impl LlmBackend for OpenAiCompatBackend {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No choices in OpenAI-compatible chat response"))?;
 
-        if let Some(reason) = &choice.finish_reason {
-            if reason == "length" {
-                tracing::warn!(
-                    "LLM output truncated (finish_reason=length) — response may be incomplete"
-                );
-            }
-        }
+        warn_if_truncated(choice.finish_reason.as_deref());
 
         if let Some(reasoning) = choice
             .message
@@ -256,48 +285,8 @@ impl LlmBackend for OpenAiCompatBackend {
         messages: &[ChatMessage],
         on_chunk: ChunkCallback<'_>,
     ) -> Result<String> {
-        let api_messages: Vec<ApiMessage> = messages
-            .iter()
-            .map(|m| ApiMessage {
-                role: m.role.as_str().to_string(),
-                content: m.content.clone(),
-            })
-            .collect();
-
-        let request = ChatRequest {
-            model: self.model.clone().unwrap_or_else(|| "default".to_string()),
-            messages: api_messages,
-            id_slot: Some(self.slot),
-            max_tokens: None,
-            temperature: self.temperature,
-            top_k: self.top_k,
-            stream: true,
-            chat_template_kwargs: self.chat_template_kwargs(),
-        };
-
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.endpoint.trim_end_matches('/')
-        );
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Accept", "text/event-stream")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to connect to OpenAI-compatible chat server")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "OpenAI-compatible chat server returned HTTP {}: {}",
-                status,
-                body
-            );
-        }
+        let request = self.build_request(messages, true);
+        let response = self.post_chat(&request).await?;
 
         let mut stream = response.bytes_stream();
         // SSE messages are separated by a blank line ("\n\n"). A single TCP
@@ -362,11 +351,11 @@ impl LlmBackend for OpenAiCompatBackend {
                     {
                         reasoning_accumulated.push_str(&reasoning);
                     }
-                    if let Some(content) = choice.delta.content {
-                        if !content.is_empty() {
-                            on_chunk(&content);
-                            accumulated.push_str(&content);
-                        }
+                    if let Some(content) = choice.delta.content
+                        && !content.is_empty()
+                    {
+                        on_chunk(&content);
+                        accumulated.push_str(&content);
                     }
                 }
             }
@@ -376,13 +365,7 @@ impl LlmBackend for OpenAiCompatBackend {
             }
         }
 
-        if let Some(reason) = &final_finish_reason {
-            if reason == "length" {
-                tracing::warn!(
-                    "LLM output truncated (finish_reason=length) — response may be incomplete"
-                );
-            }
-        }
+        warn_if_truncated(final_finish_reason.as_deref());
         if !reasoning_accumulated.is_empty() {
             tracing::debug!(
                 "LLM reasoning ({} chars): {}",

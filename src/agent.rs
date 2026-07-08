@@ -28,6 +28,19 @@ pub struct AgentResult {
     pub memories: Vec<String>,
 }
 
+/// The three system-prompt-layer strings that flow unchanged through
+/// `Agent::run` (and, in `daemon.rs`, through `process_request`/
+/// `pursue_goal` on the way there): the identity and user-profile documents,
+/// and the pre-built persistent-context annex (memories + recent
+/// interactions). Bundled into one struct so those functions stay under
+/// clippy's argument-count limit.
+#[derive(Clone, Copy)]
+pub struct PromptContext<'a> {
+    pub identity: &'a str,
+    pub user_profile: &'a str,
+    pub persistent_context: &'a str,
+}
+
 pub struct Agent {
     llm: Box<dyn LlmBackend>,
     tools: ToolRegistry,
@@ -59,22 +72,24 @@ impl Agent {
 
     /// Run the agent loop for a skill with a user message.
     /// `history` contains prior conversation messages (for TUI sessions).
-    /// `persistent_context` is loaded from storage (memories + recent interactions).
+    /// `prompt.persistent_context` is loaded from storage (memories + recent interactions).
     pub async fn run(
         &self,
         skill: &Skill,
         user_message: &str,
         history: &[ChatMessage],
-        identity: &str,
-        user_profile: &str,
-        persistent_context: &str,
+        prompt: PromptContext<'_>,
         progress_tx: Option<mpsc::UnboundedSender<AgentNotification>>,
     ) -> Result<AgentResult> {
         // Reset any per-run state held by tools (e.g. ask_claude session id).
         self.tools.notify_run_start();
 
-        let system_prompt =
-            self.build_system_prompt(skill, identity, user_profile, persistent_context);
+        let system_prompt = self.build_system_prompt(
+            skill,
+            prompt.identity,
+            prompt.user_profile,
+            prompt.persistent_context,
+        );
 
         let mut messages = vec![ChatMessage {
             role: Role::System,

@@ -112,7 +112,7 @@ pub async fn run(
 ) -> Result<()> {
     let mut state = GmailState::load();
 
-    let db_path = openferris::config::data_dir().join("openferris.db");
+    let db_path = openferris::config::db_path();
     let storage = Storage::open(&db_path)?;
 
     tracing::info!("Gmail listener starting...");
@@ -283,10 +283,9 @@ async fn poll_once(
                         .get("message")
                         .and_then(|m| m.get("id"))
                         .and_then(|v| v.as_str())
+                        && !message_ids.contains(&id.to_string())
                     {
-                        if !message_ids.contains(&id.to_string()) {
-                            message_ids.push(id.to_string());
-                        }
+                        message_ids.push(id.to_string());
                     }
                 }
             }
@@ -494,15 +493,17 @@ async fn process_message(
         &config.allowed_senders,
         owner_emails,
         Some(our_email),
-        &from,
-        cc.as_deref(),
-        None,
-        &reply_subject,
-        &response,
-        Some(&message_id_header),
-        Some(&references),
-        Some(&thread_id),
-        None,
+        email::OutboundEmail {
+            to: &from,
+            vetted_cc: cc.as_deref(),
+            unvetted_cc: None,
+            subject: &reply_subject,
+            body: &response,
+            in_reply_to: Some(&message_id_header),
+            references: Some(&references),
+            thread_id: Some(&thread_id),
+            content_type: None,
+        },
     )
     .await?;
 
@@ -738,16 +739,14 @@ fn extract_header(headers: &[serde_json::Value], name: &str) -> Option<String> {
 fn extract_plain_text_body(message: &serde_json::Value) -> Option<String> {
     let payload = message.get("payload")?;
     // Try top-level body first (simple messages)
-    if let Some(mime) = payload.get("mimeType").and_then(|v| v.as_str()) {
-        if mime == "text/plain" {
-            if let Some(data) = payload
-                .get("body")
-                .and_then(|b| b.get("data"))
-                .and_then(|d| d.as_str())
-            {
-                return decode_base64url(data);
-            }
-        }
+    if let Some(mime) = payload.get("mimeType").and_then(|v| v.as_str())
+        && mime == "text/plain"
+        && let Some(data) = payload
+            .get("body")
+            .and_then(|b| b.get("data"))
+            .and_then(|d| d.as_str())
+    {
+        return decode_base64url(data);
     }
     // Walk parts recursively
     extract_text_from_parts(payload)
@@ -757,20 +756,19 @@ fn extract_text_from_parts(part: &serde_json::Value) -> Option<String> {
     if let Some(parts) = part.get("parts").and_then(|p| p.as_array()) {
         for p in parts {
             let mime = p.get("mimeType").and_then(|v| v.as_str()).unwrap_or("");
-            if mime == "text/plain" {
-                if let Some(data) = p
+            if mime == "text/plain"
+                && let Some(data) = p
                     .get("body")
                     .and_then(|b| b.get("data"))
                     .and_then(|d| d.as_str())
-                {
-                    return decode_base64url(data);
-                }
+            {
+                return decode_base64url(data);
             }
             // Recurse into nested parts (multipart/alternative, etc.)
-            if mime.starts_with("multipart/") {
-                if let Some(text) = extract_text_from_parts(p) {
-                    return Some(text);
-                }
+            if mime.starts_with("multipart/")
+                && let Some(text) = extract_text_from_parts(p)
+            {
+                return Some(text);
             }
         }
     }

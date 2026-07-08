@@ -77,21 +77,7 @@ fn validate_cron_expr(expr: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_crontab() -> Result<String> {
-    let output = std::process::Command::new("crontab")
-        .arg("-l")
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run crontab: {}", e))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        // Empty crontab returns error on some systems
-        Ok(String::new())
-    }
-}
-
-async fn read_crontab_async() -> Result<String> {
+async fn read_crontab() -> Result<String> {
     let mut cmd = tokio::process::Command::new("crontab");
     cmd.arg("-l").kill_on_drop(true);
     let output = tokio::time::timeout(CRONTAB_TIMEOUT, cmd.output())
@@ -107,28 +93,7 @@ async fn read_crontab_async() -> Result<String> {
     }
 }
 
-fn write_crontab(content: &str) -> Result<()> {
-    use std::io::Write;
-    let mut child = std::process::Command::new("crontab")
-        .arg("-")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to run crontab: {}", e))?;
-
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| anyhow::anyhow!("Failed to open stdin pipe for crontab"))?
-        .write_all(content.as_bytes())?;
-
-    let status = child.wait()?;
-    if !status.success() {
-        anyhow::bail!("crontab returned error");
-    }
-    Ok(())
-}
-
-async fn write_crontab_async(content: &str) -> Result<()> {
+async fn write_crontab(content: &str) -> Result<()> {
     let mut child = tokio::process::Command::new("crontab")
         .arg("-")
         .stdin(std::process::Stdio::piped())
@@ -180,11 +145,11 @@ fn line_matches_skill(line: &str, skill_name: &str) -> bool {
     marker_skill_name(line) == Some(skill_name)
 }
 
-pub fn add(skill_name: &str, cron_expr: &str) -> Result<String> {
+pub async fn add_async(skill_name: &str, cron_expr: &str) -> Result<String> {
     validate_skill_name(skill_name)?;
     validate_cron_expr(cron_expr)?;
 
-    let mut crontab = read_crontab()?;
+    let mut crontab = read_crontab().await?;
     let marker = format!("{} {}", CRON_MARKER, skill_name);
 
     // Check if already scheduled
@@ -204,55 +169,16 @@ pub fn add(skill_name: &str, cron_expr: &str) -> Result<String> {
     );
 
     crontab.push_str(&entry);
-    write_crontab(&crontab)?;
+    write_crontab(&crontab).await?;
 
     Ok(format!("Scheduled '{}': {}", skill_name, cron_expr))
-}
-
-pub async fn add_async(skill_name: &str, cron_expr: &str) -> Result<String> {
-    validate_skill_name(skill_name)?;
-    validate_cron_expr(cron_expr)?;
-
-    let mut crontab = read_crontab_async().await?;
-    let marker = format!("{} {}", CRON_MARKER, skill_name);
-
-    if crontab.lines().any(|l| line_matches_skill(l, skill_name)) {
-        anyhow::bail!(
-            "Skill '{}' is already scheduled. Remove it first.",
-            skill_name
-        );
-    }
-
-    let entry = format!(
-        "{} {} run {} {}\n",
-        cron_expr,
-        binary_path(),
-        skill_name,
-        marker
-    );
-
-    crontab.push_str(&entry);
-    write_crontab_async(&crontab).await?;
-
-    Ok(format!("Scheduled '{}': {}", skill_name, cron_expr))
-}
-
-pub fn remove(skill_name: &str) -> Result<String> {
-    let crontab = read_crontab()?;
-    match crontab_without_skill(skill_name, &crontab) {
-        Some(new_crontab) => {
-            write_crontab(&new_crontab)?;
-            Ok(format!("Removed schedule for '{}'.", skill_name))
-        }
-        None => Ok(format!("No schedule found for '{}'.", skill_name)),
-    }
 }
 
 pub async fn remove_async(skill_name: &str) -> Result<String> {
-    let crontab = read_crontab_async().await?;
+    let crontab = read_crontab().await?;
     match crontab_without_skill(skill_name, &crontab) {
         Some(new_crontab) => {
-            write_crontab_async(&new_crontab).await?;
+            write_crontab(&new_crontab).await?;
             Ok(format!("Removed schedule for '{}'.", skill_name))
         }
         None => Ok(format!("No schedule found for '{}'.", skill_name)),
@@ -279,8 +205,8 @@ fn crontab_without_skill(skill_name: &str, crontab: &str) -> Option<String> {
     })
 }
 
-pub fn list() -> Result<String> {
-    format_crontab_entries(&read_crontab()?)
+pub async fn list_async() -> Result<String> {
+    format_crontab_entries(&read_crontab().await?)
 }
 
 fn format_crontab_entries(crontab: &str) -> Result<String> {
@@ -306,10 +232,6 @@ fn format_crontab_entries(crontab: &str) -> Result<String> {
         }
     }
     Ok(output)
-}
-
-pub async fn list_async() -> Result<String> {
-    format_crontab_entries(&read_crontab_async().await?)
 }
 
 #[cfg(test)]

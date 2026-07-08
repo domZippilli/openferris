@@ -1,9 +1,19 @@
-use openferris::agent::Agent;
+use openferris::agent::{Agent, PromptContext};
 use openferris::llm::mock::MockLlm;
 use openferris::protocol::AgentNotification;
 use openferris::skills::Skill;
 use openferris::tools::ToolRegistry;
 use openferris::tools::datetime::DateTimeTool;
+
+/// An empty `PromptContext` for tests that don't care about identity/user
+/// profile/persistent-context content.
+fn empty_prompt_ctx() -> PromptContext<'static> {
+    PromptContext {
+        identity: "",
+        user_profile: "",
+        persistent_context: "",
+    }
+}
 
 fn test_skill(tool_names: &[&str]) -> Skill {
     Skill {
@@ -28,7 +38,7 @@ async fn test_direct_answer() {
     let skill = test_skill(&["datetime"]);
 
     let result = agent
-        .run(&skill, "Hi", &[], "", "", "", None)
+        .run(&skill, "Hi", &[], empty_prompt_ctx(), None)
         .await
         .unwrap();
 
@@ -54,7 +64,7 @@ async fn test_single_tool_call() {
     let skill = test_skill(&["datetime"]);
 
     let result = agent
-        .run(&skill, "What time is it?", &[], "", "", "", None)
+        .run(&skill, "What time is it?", &[], empty_prompt_ctx(), None)
         .await
         .unwrap();
 
@@ -78,7 +88,7 @@ async fn test_tool_sieve_blocks_disallowed() {
     let skill = test_skill(&["datetime"]); // only datetime allowed
 
     let result = agent
-        .run(&skill, "Fetch example.com", &[], "", "", "", None)
+        .run(&skill, "Fetch example.com", &[], empty_prompt_ctx(), None)
         .await
         .unwrap();
 
@@ -95,7 +105,7 @@ async fn test_memory_extraction() {
     let skill = test_skill(&[]);
 
     let result = agent
-        .run(&skill, "I prefer dark mode", &[], "", "", "", None)
+        .run(&skill, "I prefer dark mode", &[], empty_prompt_ctx(), None)
         .await
         .unwrap();
 
@@ -126,7 +136,13 @@ async fn test_multiple_tool_calls_in_one_response() {
     let skill = test_skill(&["datetime"]);
 
     let result = agent
-        .run(&skill, "Double check the time", &[], "", "", "", None)
+        .run(
+            &skill,
+            "Double check the time",
+            &[],
+            empty_prompt_ctx(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -151,7 +167,7 @@ async fn test_max_iterations_exceeded() {
     let skill = test_skill(&["datetime"]);
 
     let err = agent
-        .run(&skill, "Loop forever", &[], "", "", "", None)
+        .run(&skill, "Loop forever", &[], empty_prompt_ctx(), None)
         .await
         .unwrap_err();
 
@@ -191,7 +207,13 @@ async fn test_assistant_chunks_stream_around_tool_calls() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentNotification>();
     let result = agent
-        .run(&skill, "What time is it?", &[], "", "", "", Some(tx))
+        .run(
+            &skill,
+            "What time is it?",
+            &[],
+            empty_prompt_ctx(),
+            Some(tx),
+        )
         .await
         .unwrap();
     assert_eq!(result.response, "It is currently afternoon.");
@@ -264,7 +286,7 @@ async fn test_compaction_fires_when_over_budget() {
     let skill = test_skill(&["datetime"]);
 
     let result = agent
-        .run(&skill, "What time is it?", &[], "", "", "", None)
+        .run(&skill, "What time is it?", &[], empty_prompt_ctx(), None)
         .await
         .unwrap();
 
@@ -319,7 +341,7 @@ async fn test_run_errors_when_compactions_exhausted_and_still_over_budget() {
     let skill = test_skill(&["datetime"]);
 
     let err = agent
-        .run(&skill, "What time is it?", &[], "", "", "", None)
+        .run(&skill, "What time is it?", &[], empty_prompt_ctx(), None)
         .await
         .unwrap_err();
 

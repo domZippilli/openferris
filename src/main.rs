@@ -102,29 +102,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Daemon => {
             let soul = config::load_soul()?;
-
-            let llm_backend = create_llm_backend(&config, 0)?;
-
-            let db_path = config::data_dir().join("openferris.db");
-
-            let mut tool_registry = tools::ToolRegistry::new();
-            tool_registry.register_defaults(&config);
-            tool_registry.register_db_tools(db_path.clone(), &config);
-
-            if config.llm.parallel_slots > 1 {
-                let skills_dir = config::config_dir().join("skills");
-                tool_registry.register(Box::new(tools::run_skill::RunSkillTool::new(
-                    config.llm.clone(),
-                    config.clone(),
-                    soul.clone(),
-                    config::load_identity(),
-                    config::load_user(),
-                    skills_dir,
-                    db_path.clone(),
-                )));
-            }
-
-            let agent = agent::Agent::new(llm_backend, tool_registry, soul);
+            let (agent, db_path, _skills_dir) = build_agent(&config, soul)?;
             let storage = storage::Storage::open(&db_path)?;
             tracing::info!("Storage opened at {}", db_path.display());
 
@@ -167,31 +145,9 @@ async fn main() -> Result<()> {
             let soul = config::load_soul()?;
             let identity = config::load_identity();
             let user_profile = config::load_user();
-            let llm_backend = create_llm_backend(&config, 0)?;
-
-            let db_path = config::data_dir().join("openferris.db");
-
-            let mut tool_registry = tools::ToolRegistry::new();
-            tool_registry.register_defaults(&config);
-            tool_registry.register_db_tools(db_path.clone(), &config);
-
-            let skills_dir = config::config_dir().join("skills");
-
-            if config.llm.parallel_slots > 1 {
-                tool_registry.register(Box::new(tools::run_skill::RunSkillTool::new(
-                    config.llm.clone(),
-                    config.clone(),
-                    soul.clone(),
-                    identity.clone(),
-                    user_profile.clone(),
-                    skills_dir.clone(),
-                    db_path,
-                )));
-            }
+            let (agent, _db_path, skills_dir) = build_agent(&config, soul)?;
 
             let skill = skills::load_skill(&skill, &skills_dir)?;
-
-            let agent = agent::Agent::new(llm_backend, tool_registry, soul);
 
             let (progress_tx, mut progress_rx) =
                 tokio::sync::mpsc::unbounded_channel::<openferris::protocol::AgentNotification>();
@@ -218,9 +174,11 @@ async fn main() -> Result<()> {
                     &skill,
                     &prompt,
                     &[],
-                    &identity,
-                    &user_profile,
-                    "",
+                    agent::PromptContext {
+                        identity: &identity,
+                        user_profile: &user_profile,
+                        persistent_context: "",
+                    },
                     Some(progress_tx),
                 )
                 .await?;
@@ -240,53 +198,21 @@ async fn main() -> Result<()> {
         }
         Commands::Run { skill_name } => {
             let primary = config.daemon.socket.clone();
-            let outcome = match client::send_skill(&primary, &skill_name).await {
-                Ok(r) => Ok(r),
-                Err(primary_err) => {
-                    match client::read_socket_pointer() {
-                        Some(fallback) if fallback != primary => {
-                            match client::send_skill(&fallback, &skill_name).await {
-                                Ok(r) => {
-                                    tracing::warn!(
-                                        "Connected via daemon-published socket {} (primary {} unreachable)",
-                                        fallback,
-                                        primary
-                                    );
-                                    Ok(r)
-                                }
-                                Err(fallback_err) => Err(anyhow::anyhow!(
-                                    "daemon unreachable:\n  primary {}: {:#}\n  fallback {}: {:#}",
-                                    primary,
-                                    primary_err,
-                                    fallback,
-                                    fallback_err
-                                )),
-                            }
-                        }
-                        _ => Err(primary_err
-                            .context(format!("daemon unreachable at socket {}", primary))),
-                    }
-                }
-            };
+            let name = skill_name.clone();
+            let outcome = send_via_daemon(&primary, move |socket| {
+                let name = name.clone();
+                async move { client::send_skill(&socket, &name).await }
+            })
+            .await;
 
             match outcome {
                 Ok(response) => println!("{}", response),
-                Err(e) => {
-                    let msg = format!("{:#}", e);
-                    eprintln!("openferris run {}: {}", skill_name, msg);
-                    if let Ok(store) =
-                        storage::Storage::open(&config::data_dir().join("openferris.db"))
-                        && let Err(log_err) = store.log_interaction(
-                            "cli",
-                            Some(&skill_name),
-                            &format!("run {}", skill_name),
-                            &msg,
-                        )
-                    {
-                        eprintln!("also failed to log interaction: {}", log_err);
-                    }
-                    std::process::exit(1);
-                }
+                Err(e) => log_cli_failure_and_exit(
+                    &format!("run {}", skill_name),
+                    Some(&skill_name),
+                    &format!("run {}", skill_name),
+                    e,
+                ),
             }
         }
         Commands::Goal {
@@ -295,57 +221,25 @@ async fn main() -> Result<()> {
         } => {
             let exit_criteria = exit_criteria.join(" ");
             let primary = config.daemon.socket.clone();
-            let outcome = match client::send_goal(&primary, &exit_criteria, max_turns).await {
-                Ok(r) => Ok(r),
-                Err(primary_err) => {
-                    match client::read_socket_pointer() {
-                        Some(fallback) if fallback != primary => {
-                            match client::send_goal(&fallback, &exit_criteria, max_turns).await {
-                                Ok(r) => {
-                                    tracing::warn!(
-                                        "Connected via daemon-published socket {} (primary {} unreachable)",
-                                        fallback,
-                                        primary
-                                    );
-                                    Ok(r)
-                                }
-                                Err(fallback_err) => Err(anyhow::anyhow!(
-                                    "daemon unreachable:\n  primary {}: {:#}\n  fallback {}: {:#}",
-                                    primary,
-                                    primary_err,
-                                    fallback,
-                                    fallback_err
-                                )),
-                            }
-                        }
-                        _ => Err(primary_err
-                            .context(format!("daemon unreachable at socket {}", primary))),
-                    }
-                }
-            };
+            let criteria = exit_criteria.clone();
+            let outcome = send_via_daemon(&primary, move |socket| {
+                let criteria = criteria.clone();
+                async move { client::send_goal(&socket, &criteria, max_turns).await }
+            })
+            .await;
 
             match outcome {
                 Ok(response) => println!("{}", response),
-                Err(e) => {
-                    let msg = format!("{:#}", e);
-                    eprintln!("openferris goal: {}", msg);
-                    if let Ok(store) =
-                        storage::Storage::open(&config::data_dir().join("openferris.db"))
-                        && let Err(log_err) = store.log_interaction(
-                            "cli",
-                            Some("goal-pursuit"),
-                            &format!("goal {}", exit_criteria),
-                            &msg,
-                        )
-                    {
-                        eprintln!("also failed to log interaction: {}", log_err);
-                    }
-                    std::process::exit(1);
-                }
+                Err(e) => log_cli_failure_and_exit(
+                    "goal",
+                    Some("goal-pursuit"),
+                    &format!("goal {}", exit_criteria),
+                    e,
+                ),
             }
         }
         Commands::Schedule(cmd) => {
-            schedule_command(cmd)?;
+            schedule_command(cmd).await?;
         }
         Commands::Forget { window, yes } => {
             forget_command(&window, yes)?;
@@ -356,7 +250,7 @@ async fn main() -> Result<()> {
 }
 
 fn forget_command(window: &str, skip_confirm: bool) -> Result<()> {
-    let db_path = config::data_dir().join("openferris.db");
+    let db_path = config::db_path();
     let mems = memories::Memories::new(memories::Memories::default_path());
 
     let since = parse_time_window(window)?;
@@ -459,47 +353,131 @@ fn parse_time_window(window: &str) -> Result<Option<String>> {
     Ok(Some(cutoff.format("%Y-%m-%d %H:%M:%S").to_string()))
 }
 
-fn schedule_command(cmd: ScheduleCommand) -> Result<()> {
+/// Send a request to the daemon at `primary`, falling back to the
+/// daemon-published pointer socket (written by the daemon on startup, for
+/// clients like cron whose env-derived default path may differ) if the
+/// primary is unreachable. `request` performs the actual RPC against a given
+/// socket path; it's called once against `primary`, and again against the
+/// fallback socket only if that differs from `primary` and the first attempt
+/// failed. A failure of both attempts names both sockets and both underlying
+/// errors so the operator can tell which is actually down.
+async fn send_via_daemon<F, Fut>(primary: &str, request: F) -> Result<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    match request(primary.to_string()).await {
+        Ok(r) => Ok(r),
+        Err(primary_err) => match client::read_socket_pointer() {
+            Some(fallback) if fallback != primary => match request(fallback.clone()).await {
+                Ok(r) => {
+                    tracing::warn!(
+                        "Connected via daemon-published socket {} (primary {} unreachable)",
+                        fallback,
+                        primary
+                    );
+                    Ok(r)
+                }
+                Err(fallback_err) => Err(anyhow::anyhow!(
+                    "daemon unreachable:\n  primary {}: {:#}\n  fallback {}: {:#}",
+                    primary,
+                    primary_err,
+                    fallback,
+                    fallback_err
+                )),
+            },
+            _ => Err(primary_err.context(format!("daemon unreachable at socket {}", primary))),
+        },
+    }
+}
+
+/// Print a CLI failure, best-effort log it to SQLite, and exit(1). Shared by
+/// the `Run`/`Goal` failure paths, which differ only in the eprintln label,
+/// the logged skill name, and the logged description.
+fn log_cli_failure_and_exit(
+    label: &str,
+    skill_name: Option<&str>,
+    description: &str,
+    err: anyhow::Error,
+) -> ! {
+    let msg = format!("{:#}", err);
+    eprintln!("openferris {}: {}", label, msg);
+    if let Ok(store) = storage::Storage::open(&config::db_path())
+        && let Err(log_err) = store.log_interaction("cli", skill_name, description, &msg)
+    {
+        eprintln!("also failed to log interaction: {}", log_err);
+    }
+    std::process::exit(1);
+}
+
+async fn schedule_command(cmd: ScheduleCommand) -> Result<()> {
     let msg = match cmd {
         ScheduleCommand::Add {
             skill_name,
             cron_expr,
-        } => schedule::add(&skill_name, &cron_expr)?,
-        ScheduleCommand::Remove { skill_name } => schedule::remove(&skill_name)?,
-        ScheduleCommand::List => schedule::list()?,
+        } => schedule::add_async(&skill_name, &cron_expr).await?,
+        ScheduleCommand::Remove { skill_name } => schedule::remove_async(&skill_name).await?,
+        ScheduleCommand::List => schedule::list_async().await?,
     };
     println!("{}", msg);
     Ok(())
 }
 
-fn create_llm_backend(
+/// Build the top-level `Agent` shared by `Daemon` and `TestAgent`: the LLM
+/// backend, a tool registry with the DB-backed tools registered, and — when
+/// `config.llm.parallel_slots > 1` — the `run_skill` subagent tool. Returns
+/// the agent along with the DB path and skills directory it derived, since
+/// each caller needs a different subset afterward (`Daemon` needs the DB
+/// path to open storage; `TestAgent` needs the skills directory to load the
+/// requested skill).
+fn build_agent(
     config: &config::AppConfig,
-    slot: i32,
-) -> anyhow::Result<Box<dyn llm::LlmBackend>> {
-    match config.llm.backend.as_str() {
-        "openai_compat" | "openai-compatible" | "llamacpp" => {
-            Ok(Box::new(llm::openai_compat::OpenAiCompatBackend::new(
-                config.llm.endpoint.clone(),
-                config.llm.model.clone(),
-                config.llm.temperature,
-                config.llm.top_k,
-                config.llm.enable_thinking,
-                slot,
-            )?))
-        }
-        other => {
-            tracing::warn!(
-                "Unknown LLM backend '{}', defaulting to openai_compat",
-                other
-            );
-            Ok(Box::new(llm::openai_compat::OpenAiCompatBackend::new(
-                config.llm.endpoint.clone(),
-                config.llm.model.clone(),
-                config.llm.temperature,
-                config.llm.top_k,
-                config.llm.enable_thinking,
-                slot,
-            )?))
-        }
+    soul: String,
+) -> anyhow::Result<(agent::Agent, std::path::PathBuf, std::path::PathBuf)> {
+    let llm_backend = create_llm_backend(config)?;
+    let db_path = config::db_path();
+    let skills_dir = config::config_dir().join("skills");
+
+    let mut tool_registry = tools::ToolRegistry::new();
+    tool_registry.register_defaults(config);
+    tool_registry.register_db_tools(db_path.clone(), config);
+
+    if config.llm.parallel_slots > 1 {
+        tool_registry.register(Box::new(tools::run_skill::RunSkillTool::new(
+            config.llm.clone(),
+            config.clone(),
+            soul.clone(),
+            config::load_identity(),
+            config::load_user(),
+            skills_dir.clone(),
+            db_path.clone(),
+        )));
     }
+
+    let agent = agent::Agent::new(llm_backend, tool_registry, soul);
+    Ok((agent, db_path, skills_dir))
+}
+
+/// Build the parent agent's LLM backend (always slot 0 — subagents spawned by
+/// `RunSkillTool` construct their own backend on slot 1 directly, without
+/// going through this function). `openai_compat`/`openai-compatible`/
+/// `llamacpp` are all handled by the same backend; anything else falls back
+/// to it too, with a warning, since it's currently the only backend that
+/// exists.
+fn create_llm_backend(config: &config::AppConfig) -> anyhow::Result<Box<dyn llm::LlmBackend>> {
+    match config.llm.backend.as_str() {
+        "openai_compat" | "openai-compatible" | "llamacpp" => {}
+        other => tracing::warn!(
+            "Unknown LLM backend '{}', defaulting to openai_compat",
+            other
+        ),
+    }
+    Ok(Box::new(llm::openai_compat::OpenAiCompatBackend::new(
+        config.llm.endpoint.clone(),
+        config.llm.model.clone(),
+        config.llm.temperature,
+        config.llm.top_k,
+        config.llm.enable_thinking,
+        0,
+    )?))
 }

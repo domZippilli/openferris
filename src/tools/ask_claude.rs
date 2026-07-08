@@ -16,6 +16,12 @@ pub struct AskClaudeTool {
     session: Mutex<Option<String>>,
 }
 
+impl Default for AskClaudeTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AskClaudeTool {
     pub fn new() -> Self {
         Self {

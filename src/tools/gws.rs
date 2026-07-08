@@ -16,7 +16,7 @@ const DENIED_METHODS: &[&str] = &["delete", "trash", "send", "empty", "remove"];
 /// Denied top-level subcommands.
 const DENIED_SUBCOMMANDS: &[&str] = &["auth"];
 const MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
-const MAX_BASE64_BYTES: u64 = 1 * 1024 * 1024;
+const MAX_BASE64_BYTES: u64 = 1024 * 1024;
 const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/jpeg",
     "image/png",
@@ -59,11 +59,11 @@ struct DriveFileMetadata {
 fn shell_split(input: &str) -> Result<Vec<String>> {
     let mut args = vec![];
     let mut current = String::new();
-    let mut chars = input.chars().peekable();
+    let chars = input.chars();
     let mut in_single = false;
     let mut in_double = false;
 
-    while let Some(c) = chars.next() {
+    for c in chars {
         match c {
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
@@ -230,14 +230,14 @@ fn validate_drive_file(
         );
     }
 
-    if let Some(size) = parse_drive_size(metadata.size.as_ref())? {
-        if size > max_bytes {
-            bail!(
-                "Drive file is too large: {} bytes exceeds max_bytes {}",
-                size,
-                max_bytes
-            );
-        }
+    if let Some(size) = parse_drive_size(metadata.size.as_ref())?
+        && size > max_bytes
+    {
+        bail!(
+            "Drive file is too large: {} bytes exceeds max_bytes {}",
+            size,
+            max_bytes
+        );
     }
 
     Ok(())

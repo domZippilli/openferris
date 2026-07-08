@@ -59,12 +59,17 @@ impl Tool for SendEmailTool {
             &self.db_path,
             &self.allowed_senders,
             &self.owner_emails,
-            to,
-            self.always_cc.as_deref(),
-            param_cc,
-            subject,
-            body,
-            content_type,
+            crate::email::OutboundEmail {
+                to,
+                vetted_cc: self.always_cc.as_deref(),
+                unvetted_cc: param_cc,
+                subject,
+                body,
+                in_reply_to: None,
+                references: None,
+                thread_id: None,
+                content_type,
+            },
         )
         .await?;
 

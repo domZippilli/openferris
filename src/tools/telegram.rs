@@ -190,85 +190,75 @@ fn markdown_to_html(text: &str) -> String {
         }
 
         // `inline code`
-        if c == '`' {
-            if let Some(end) = find_closing(&chars, i + 1, '`') {
-                result.push_str("<code>");
-                for j in (i + 1)..end {
-                    result.push(chars[j]);
-                }
-                result.push_str("</code>");
-                i = end + 1;
-                continue;
-            }
+        if c == '`'
+            && let Some(end) = find_closing(&chars, i + 1, '`')
+        {
+            result.push_str("<code>");
+            result.extend(&chars[(i + 1)..end]);
+            result.push_str("</code>");
+            i = end + 1;
+            continue;
         }
 
         // [text](url) links
-        if c == '[' {
-            if let Some((text_end, url_start, url_end)) = find_markdown_link(&chars, i) {
-                result.push_str("<a href=\"");
-                for j in url_start..url_end {
-                    result.push(chars[j]);
-                }
-                result.push_str("\">");
-                for j in (i + 1)..text_end {
-                    result.push(chars[j]);
-                }
-                result.push_str("</a>");
-                i = url_end + 1; // skip past closing ')'
-                continue;
-            }
+        if c == '['
+            && let Some((text_end, url_start, url_end)) = find_markdown_link(&chars, i)
+        {
+            result.push_str("<a href=\"");
+            result.extend(&chars[url_start..url_end]);
+            result.push_str("\">");
+            result.extend(&chars[(i + 1)..text_end]);
+            result.push_str("</a>");
+            i = url_end + 1; // skip past closing ')'
+            continue;
         }
 
         // **bold** (standard markdown — must check before single *)
-        if c == '*' && i + 1 < len && chars[i + 1] == '*' {
-            if let Some(end) = find_double_closing(&chars, i + 2, '*') {
-                result.push_str("<b>");
-                for j in (i + 2)..end {
-                    result.push(chars[j]);
-                }
-                result.push_str("</b>");
-                i = end + 2;
-                continue;
-            }
+        if c == '*'
+            && i + 1 < len
+            && chars[i + 1] == '*'
+            && let Some(end) = find_double_closing(&chars, i + 2, '*')
+        {
+            result.push_str("<b>");
+            result.extend(&chars[(i + 2)..end]);
+            result.push_str("</b>");
+            i = end + 2;
+            continue;
         }
 
         // *bold* (single asterisk — Telegram convention)
-        if c == '*' {
-            if let Some(end) = find_closing(&chars, i + 1, '*') {
-                result.push_str("<b>");
-                for j in (i + 1)..end {
-                    result.push(chars[j]);
-                }
-                result.push_str("</b>");
-                i = end + 1;
-                continue;
-            }
+        if c == '*'
+            && let Some(end) = find_closing(&chars, i + 1, '*')
+        {
+            result.push_str("<b>");
+            result.extend(&chars[(i + 1)..end]);
+            result.push_str("</b>");
+            i = end + 1;
+            continue;
         }
 
         // __italic__ (standard markdown — must check before single _)
-        if c == '_' && i + 1 < len && chars[i + 1] == '_' {
-            if let Some(end) = find_double_closing(&chars, i + 2, '_') {
-                result.push_str("<i>");
-                for j in (i + 2)..end {
-                    result.push(chars[j]);
-                }
-                result.push_str("</i>");
-                i = end + 2;
-                continue;
-            }
+        if c == '_'
+            && i + 1 < len
+            && chars[i + 1] == '_'
+            && let Some(end) = find_double_closing(&chars, i + 2, '_')
+        {
+            result.push_str("<i>");
+            result.extend(&chars[(i + 2)..end]);
+            result.push_str("</i>");
+            i = end + 2;
+            continue;
         }
 
         // _italic_ (single underscore)
-        if c == '_' {
-            if let Some(end) = find_closing(&chars, i + 1, '_') {
-                result.push_str("<i>");
-                for j in (i + 1)..end {
-                    result.push(chars[j]);
-                }
-                result.push_str("</i>");
-                i = end + 1;
-                continue;
-            }
+        if c == '_'
+            && let Some(end) = find_closing(&chars, i + 1, '_')
+        {
+            result.push_str("<i>");
+            result.extend(&chars[(i + 1)..end]);
+            result.push_str("</i>");
+            i = end + 1;
+            continue;
         }
 
         result.push(c);
@@ -344,11 +334,11 @@ fn find_closing(chars: &[char], start: usize, delim: char) -> Option<usize> {
     if start >= chars.len() || chars[start] == delim {
         return None; // empty span
     }
-    for j in start..chars.len() {
-        if chars[j] == '\n' {
+    for (j, &c) in chars.iter().enumerate().skip(start) {
+        if c == '\n' {
             return None; // don't span lines
         }
-        if chars[j] == delim {
+        if c == delim {
             return Some(j);
         }
     }

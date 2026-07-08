@@ -108,9 +108,11 @@ impl Tool for RunSkillTool {
                 &skill,
                 &msg,
                 &[],
-                &self.identity,
-                &self.user_profile,
-                "",
+                crate::agent::PromptContext {
+                    identity: &self.identity,
+                    user_profile: &self.user_profile,
+                    persistent_context: "",
+                },
                 None,
             )
             .await?;

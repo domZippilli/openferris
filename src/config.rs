@@ -228,6 +228,13 @@ pub fn socket_pointer_path() -> PathBuf {
     data_dir().join("daemon.socket.path")
 }
 
+/// Path to the SQLite database (interactions, messages, wakeups, etc.).
+/// Centralizes what used to be `data_dir().join("openferris.db")` written out
+/// at each call site.
+pub fn db_path() -> PathBuf {
+    data_dir().join("openferris.db")
+}
+
 pub fn load_config() -> Result<AppConfig> {
     let path = config_dir().join("config.toml");
     let content = std::fs::read_to_string(&path).with_context(|| {

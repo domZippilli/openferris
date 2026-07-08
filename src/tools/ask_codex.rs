@@ -15,6 +15,12 @@ pub struct AskCodexTool {
     thread_id: Mutex<Option<String>>,
 }
 
+impl Default for AskCodexTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AskCodexTool {
     pub fn new() -> Self {
         Self {
@@ -37,18 +43,18 @@ fn parse_codex_jsonl(stdout: &str) -> Result<CodexExecOutput> {
         let event: serde_json::Value = serde_json::from_str(line)
             .with_context(|| format!("codex --json returned non-JSONL line: {}", line))?;
 
-        if event.get("type").and_then(|v| v.as_str()) == Some("thread.started") {
-            if let Some(id) = event.get("thread_id").and_then(|v| v.as_str()) {
-                parsed.thread_id = Some(id.to_string());
-            }
+        if event.get("type").and_then(|v| v.as_str()) == Some("thread.started")
+            && let Some(id) = event.get("thread_id").and_then(|v| v.as_str())
+        {
+            parsed.thread_id = Some(id.to_string());
         }
 
         if event.get("type").and_then(|v| v.as_str()) == Some("item.completed") {
             let item = event.get("item").unwrap_or(&serde_json::Value::Null);
-            if item.get("type").and_then(|v| v.as_str()) == Some("agent_message") {
-                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                    messages.push(text.to_string());
-                }
+            if item.get("type").and_then(|v| v.as_str()) == Some("agent_message")
+                && let Some(text) = item.get("text").and_then(|v| v.as_str())
+            {
+                messages.push(text.to_string());
             }
         }
     }
