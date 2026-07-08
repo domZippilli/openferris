@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixStream;
 
-use openferris::protocol::{DaemonRequest, DaemonResponse, RequestKind, ResponseKind};
+use openferris::protocol::{
+    DaemonRequest, DaemonResponse, RequestKind, ResponseKind, parse_goal_args,
+};
 
 pub async fn run(socket_path: &str) -> Result<()> {
     let stream = UnixStream::connect(socket_path)
@@ -135,36 +137,4 @@ pub async fn run(socket_path: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn parse_goal_args(input: &str) -> Result<(usize, String), String> {
-    let mut parts = input.split_whitespace().peekable();
-    let mut max_turns = 5usize;
-    let mut criteria = Vec::new();
-
-    while let Some(part) = parts.next() {
-        if part == "--max-turns" {
-            let Some(raw) = parts.next() else {
-                return Err("Usage: /goal [--max-turns N] <exit criteria>".to_string());
-            };
-            max_turns = raw
-                .parse::<usize>()
-                .map_err(|_| "max turns must be a positive integer".to_string())?;
-        } else if let Some(raw) = part.strip_prefix("--max-turns=") {
-            max_turns = raw
-                .parse::<usize>()
-                .map_err(|_| "max turns must be a positive integer".to_string())?;
-        } else {
-            criteria.push(part);
-            criteria.extend(parts);
-            break;
-        }
-    }
-
-    let exit_criteria = criteria.join(" ").trim().to_string();
-    if exit_criteria.is_empty() {
-        return Err("Usage: /goal [--max-turns N] <exit criteria>".to_string());
-    }
-
-    Ok((max_turns, exit_criteria))
 }

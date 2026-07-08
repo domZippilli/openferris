@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use super::Tool;
+use super::{Tool, require_str};
 
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -46,10 +46,7 @@ impl Tool for AskClaudeTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let prompt = params
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: prompt"))?;
+        let prompt = require_str(&params, "prompt")?;
 
         let resume = self.session.lock().expect("session mutex poisoned").clone();
 

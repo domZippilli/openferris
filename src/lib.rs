@@ -8,5 +8,7 @@ pub mod tools;
 // These are needed by the public modules above but not directly by tests.
 pub mod counterparty;
 pub mod email;
+pub mod gws_cli;
 pub mod protocol;
 pub mod storage;
+pub mod text;

@@ -4,18 +4,17 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::config::GwsConfig;
+use crate::gws_cli;
 
-use super::{Tool, files};
+use super::{Tool, files, require_str, truncate_for_context};
 
 /// Denied method verbs — these are destructive or send outbound messages.
 const DENIED_METHODS: &[&str] = &["delete", "trash", "send", "empty", "remove"];
 
 /// Denied top-level subcommands.
 const DENIED_SUBCOMMANDS: &[&str] = &["auth"];
-const GWS_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_BASE64_BYTES: u64 = 1 * 1024 * 1024;
 const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
@@ -203,45 +202,6 @@ fn requested_mime_allowlist(params: &serde_json::Value) -> Result<Vec<String>> {
     Ok(allowlist)
 }
 
-async fn run_gws(args: &[&str]) -> Result<std::process::Output> {
-    let output = tokio::time::timeout(
-        GWS_TIMEOUT,
-        tokio::process::Command::new("gws")
-            .args(args)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("gws timed out after {:?}", GWS_TIMEOUT))?
-    .map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            anyhow::anyhow!(
-                "gws is not installed. Install with: npm install -g @googleworkspace/cli"
-            )
-        } else {
-            anyhow::anyhow!("Failed to run gws: {}", e)
-        }
-    })?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut error_msg = String::new();
-        if !stdout.is_empty() {
-            error_msg.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            if !error_msg.is_empty() {
-                error_msg.push('\n');
-            }
-            error_msg.push_str(&stderr);
-        }
-        bail!("gws exited with {}: {}", output.status, error_msg.trim());
-    }
-
-    Ok(output)
-}
-
 async fn fetch_drive_file_metadata(file_id: &str) -> Result<DriveFileMetadata> {
     let metadata_params = json!({
         "fileId": file_id,
@@ -249,9 +209,10 @@ async fn fetch_drive_file_metadata(file_id: &str) -> Result<DriveFileMetadata> {
         "supportsAllDrives": true
     })
     .to_string();
-    let metadata_output = run_gws(&["drive", "files", "get", "--params", &metadata_params])
-        .await
-        .context("Failed to fetch Drive file metadata")?;
+    let metadata_output =
+        gws_cli::run_gws(&["drive", "files", "get", "--params", &metadata_params])
+            .await
+            .context("Failed to fetch Drive file metadata")?;
 
     serde_json::from_slice(&metadata_output.stdout).context("Failed to parse Drive file metadata")
 }
@@ -294,7 +255,7 @@ async fn download_drive_file_to_path(file_id: &str, output_path: &Path) -> Resul
     })
     .to_string();
 
-    run_gws(&[
+    gws_cli::run_gws(&[
         "drive",
         "files",
         "get",
@@ -330,67 +291,21 @@ impl Tool for GwsTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let command = params
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: command"))?;
+        let command = require_str(&params, "command")?;
 
         let args = shell_split(command)?;
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         is_allowed(&arg_refs, &self.config)?;
 
-        let mut cmd = tokio::process::Command::new("gws");
-        cmd.args(&args).kill_on_drop(true);
-
-        let output = tokio::time::timeout(GWS_TIMEOUT, cmd.output())
-            .await
-            .map_err(|_| anyhow::anyhow!("gws timed out after {:?}", GWS_TIMEOUT))?
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    anyhow::anyhow!(
-                        "gws is not installed. Install with: npm install -g @googleworkspace/cli"
-                    )
-                } else {
-                    anyhow::anyhow!("Failed to run gws: {}", e)
-                }
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !output.status.success() {
-            // gws prints structured errors to stdout and info lines (like keyring backend) to stderr.
-            // Include both so we always surface the real error.
-            let mut error_msg = String::new();
-            if !stdout.is_empty() {
-                error_msg.push_str(&stdout);
-            }
-            if !stderr.is_empty() {
-                if !error_msg.is_empty() {
-                    error_msg.push('\n');
-                }
-                error_msg.push_str(&stderr);
-            }
-            bail!("gws exited with {}: {}", output.status, error_msg.trim());
-        }
-
-        let result = stdout.to_string();
+        // gws prints structured errors to stdout and info lines (like keyring
+        // backend) to stderr; gws_cli::run_gws includes both in its error
+        // message so we always surface the real error.
+        let output = gws_cli::run_gws(&arg_refs).await?;
+        let result = String::from_utf8_lossy(&output.stdout).to_string();
 
         // Truncate very large output to avoid blowing up context
         const MAX_LEN: usize = 50_000;
-        if result.len() > MAX_LEN {
-            let mut end = MAX_LEN;
-            while !result.is_char_boundary(end) {
-                end -= 1;
-            }
-            Ok(format!(
-                "{}\n\n[Truncated — output was {} bytes]",
-                &result[..end],
-                result.len()
-            ))
-        } else {
-            Ok(result)
-        }
+        Ok(truncate_for_context(result, MAX_LEN, "output"))
     }
 }
 
@@ -411,10 +326,7 @@ impl Tool for GwsDriveDownloadFileTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let file_id = params
-            .get("file_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: file_id"))?;
+        let file_id = require_str(&params, "file_id")?;
         if file_id.trim().is_empty() {
             bail!("file_id must not be empty");
         }
@@ -484,18 +396,12 @@ impl Tool for GwsDriveDownloadFileToPathTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let file_id = params
-            .get("file_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: file_id"))?;
+        let file_id = require_str(&params, "file_id")?;
         if file_id.trim().is_empty() {
             bail!("file_id must not be empty");
         }
 
-        let destination_path = params
-            .get("destination_path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: destination_path"))?;
+        let destination_path = require_str(&params, "destination_path")?;
         if destination_path.trim().is_empty() {
             bail!("destination_path must not be empty");
         }

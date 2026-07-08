@@ -69,6 +69,42 @@ pub enum AgentNotification {
     AssistantChunk(String),
 }
 
+/// Parse a `/goal [--max-turns N] <exit criteria>` command body (the text
+/// after the `/goal ` prefix) into the `(max_turns, exit_criteria)` pair
+/// used to build a [`RequestKind::PursueGoal`]. Shared by the Telegram and
+/// TUI clients, which expose the same `/goal` command.
+pub fn parse_goal_args(input: &str) -> Result<(usize, String), String> {
+    let mut parts = input.split_whitespace().peekable();
+    let mut max_turns = 5usize;
+    let mut criteria = Vec::new();
+
+    while let Some(part) = parts.next() {
+        if part == "--max-turns" {
+            let Some(raw) = parts.next() else {
+                return Err("Usage: /goal [--max-turns N] <exit criteria>".to_string());
+            };
+            max_turns = raw
+                .parse::<usize>()
+                .map_err(|_| "max turns must be a positive integer".to_string())?;
+        } else if let Some(raw) = part.strip_prefix("--max-turns=") {
+            max_turns = raw
+                .parse::<usize>()
+                .map_err(|_| "max turns must be a positive integer".to_string())?;
+        } else {
+            criteria.push(part);
+            criteria.extend(parts);
+            break;
+        }
+    }
+
+    let exit_criteria = criteria.join(" ").trim().to_string();
+    if exit_criteria.is_empty() {
+        return Err("Usage: /goal [--max-turns N] <exit criteria>".to_string());
+    }
+
+    Ok((max_turns, exit_criteria))
+}
+
 /// Map internal tool names to human-friendly progress labels.
 pub fn tool_progress_label(tool_name: &str) -> &'static str {
     match tool_name {
@@ -89,5 +125,48 @@ pub fn tool_progress_label(tool_name: &str) -> &'static str {
         "send_email" => "Sending an email...",
         "run_skill" => "Running a sub-task...",
         _ => "Working...",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_goal_args_plain_criteria_uses_default_max_turns() {
+        let (max_turns, criteria) = parse_goal_args("book a table for Friday").unwrap();
+        assert_eq!(max_turns, 5);
+        assert_eq!(criteria, "book a table for Friday");
+    }
+
+    #[test]
+    fn parse_goal_args_accepts_space_separated_max_turns() {
+        let (max_turns, criteria) = parse_goal_args("--max-turns 10 find a plumber").unwrap();
+        assert_eq!(max_turns, 10);
+        assert_eq!(criteria, "find a plumber");
+    }
+
+    #[test]
+    fn parse_goal_args_accepts_equals_max_turns() {
+        let (max_turns, criteria) = parse_goal_args("--max-turns=3 find a plumber").unwrap();
+        assert_eq!(max_turns, 3);
+        assert_eq!(criteria, "find a plumber");
+    }
+
+    #[test]
+    fn parse_goal_args_errors_on_empty_criteria() {
+        assert!(parse_goal_args("--max-turns 3").is_err());
+        assert!(parse_goal_args("").is_err());
+    }
+
+    #[test]
+    fn parse_goal_args_errors_on_non_numeric_max_turns() {
+        assert!(parse_goal_args("--max-turns abc find a plumber").is_err());
+        assert!(parse_goal_args("--max-turns=abc find a plumber").is_err());
+    }
+
+    #[test]
+    fn parse_goal_args_errors_on_missing_max_turns_value() {
+        assert!(parse_goal_args("--max-turns").is_err());
     }
 }

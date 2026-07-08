@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::Tool;
+use super::{Tool, require_str, truncate_for_context};
 
 const MAX_LEN: usize = 50_000;
 
@@ -59,10 +59,7 @@ impl Tool for ScrapeUrlTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let url = params
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?;
+        let url = require_str(&params, "url")?;
 
         let body = serde_json::json!({
             "url": url,
@@ -93,7 +90,7 @@ impl Tool for ScrapeUrlTool {
         let data = parsed
             .data
             .ok_or_else(|| anyhow::anyhow!("Firecrawl response missing data"))?;
-        let mut md = data.markdown.unwrap_or_default();
+        let md = data.markdown.unwrap_or_default();
 
         let title = data
             .metadata
@@ -106,18 +103,7 @@ impl Tool for ScrapeUrlTool {
             .and_then(|v| v.as_str())
             .unwrap_or(url);
 
-        if md.len() > MAX_LEN {
-            let mut end = MAX_LEN;
-            while !md.is_char_boundary(end) {
-                end -= 1;
-            }
-            let original = md.len();
-            md.truncate(end);
-            md.push_str(&format!(
-                "\n\n[Truncated — markdown was {} bytes]",
-                original
-            ));
-        }
+        let md = truncate_for_context(md, MAX_LEN, "markdown");
 
         Ok(format!("# {}\n<{}>\n\n{}", title, source_url, md))
     }

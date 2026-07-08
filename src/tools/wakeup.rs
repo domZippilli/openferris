@@ -4,7 +4,7 @@ use chrono::TimeZone;
 use chrono_tz::Tz;
 use std::path::PathBuf;
 
-use super::Tool;
+use super::{Tool, require_str};
 use crate::storage::Storage;
 
 /// `set_wakeup`: a one-shot, precise-time deferred-action primitive (refactor
@@ -56,10 +56,7 @@ impl Tool for SetWakeupTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let action = params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: action"))?;
+        let action = require_str(&params, "action")?;
 
         let storage = Storage::open(&self.db_path)?;
 
@@ -74,14 +71,8 @@ impl Tool for SetWakeupTool {
 
 impl SetWakeupTool {
     fn add(&self, storage: &Storage, params: &serde_json::Value) -> Result<String> {
-        let due = params
-            .get("due")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: due"))?;
-        let note = params
-            .get("note")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: note"))?;
+        let due = require_str(params, "due")?;
+        let note = require_str(params, "note")?;
 
         if note.trim().is_empty() {
             anyhow::bail!(

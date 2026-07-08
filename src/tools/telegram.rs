@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
 
-use super::Tool;
+use super::{Tool, require_str};
 use crate::storage::Storage;
 
 pub struct SendTelegramTool {
@@ -56,10 +56,7 @@ impl Tool for SendTelegramTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let message = params
-            .get("message")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: message"))?;
+        let message = require_str(&params, "message")?;
 
         let chat_id = params
             .get("chat_id")
@@ -466,7 +463,7 @@ fn scan_html_tags(text: &str) -> Vec<TagOccurrence> {
 /// Telegram's `sendMessage` then rejects the message with a 400. This closes
 /// any span still open at the end of a chunk and reopens it at the start of
 /// the next one, so every chunk is independently balanced HTML.
-fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
+pub fn chunk_message(text: &str, max_len: usize) -> Vec<String> {
     if text.len() <= max_len {
         return vec![text.to_string()];
     }

@@ -310,26 +310,18 @@ fn compose_raw(
 }
 
 async fn run_gws_send(json_body: &str) -> Result<()> {
-    let output = tokio::process::Command::new("gws")
-        .args([
-            "gmail",
-            "users",
-            "messages",
-            "send",
-            "--params",
-            r#"{"userId":"me"}"#,
-            "--json",
-            json_body,
-        ])
-        .output()
-        .await
-        .context("Failed to run gws")?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("gws send failed: {}{}", stdout, stderr);
-    }
+    crate::gws_cli::run_gws(&[
+        "gmail",
+        "users",
+        "messages",
+        "send",
+        "--params",
+        r#"{"userId":"me"}"#,
+        "--json",
+        json_body,
+    ])
+    .await
+    .context("Failed to send email via gws")?;
 
     Ok(())
 }

@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::Tool;
+use super::{Tool, require_str};
 
 const MAX_RESULTS: usize = 15;
 const SNIPPET_CAP: usize = 200;
@@ -55,10 +55,7 @@ impl Tool for WebSearchTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let query = params
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: query"))?;
+        let query = require_str(&params, "query")?;
         let categories = params
             .get("categories")
             .and_then(|v| v.as_str())

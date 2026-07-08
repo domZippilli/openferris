@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::net::IpAddr;
 use url::Url;
 
-use super::Tool;
+use super::{Tool, require_str, truncate_for_context};
 
 /// Maximum number of redirects to follow. Matches the previous
 /// `redirect::Policy::limited(5)` behavior.
@@ -114,10 +114,7 @@ impl Tool for FetchUrlTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let url_str = params
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?;
+        let url_str = require_str(&params, "url")?;
 
         let (mut current_url, mut pinned_addr) = self.validate_target(url_str).await?;
 
@@ -174,19 +171,7 @@ impl Tool for FetchUrlTool {
 
         // Truncate very large responses to avoid blowing up context
         const MAX_LEN: usize = 50_000;
-        if body.len() > MAX_LEN {
-            let mut end = MAX_LEN;
-            while !body.is_char_boundary(end) {
-                end -= 1;
-            }
-            Ok(format!(
-                "{}\n\n[Truncated — response was {} bytes]",
-                &body[..end],
-                body.len()
-            ))
-        } else {
-            Ok(body)
-        }
+        Ok(truncate_for_context(body, MAX_LEN, "response"))
     }
 }
 

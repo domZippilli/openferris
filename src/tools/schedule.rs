@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::Tool;
+use super::{Tool, require_str};
 
 pub struct ScheduleTool;
 
@@ -20,28 +20,16 @@ impl Tool for ScheduleTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let action = params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: action"))?;
+        let action = require_str(&params, "action")?;
 
         match action {
             "add" => {
-                let skill_name = params
-                    .get("skill_name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: skill_name"))?;
-                let cron_expr = params
-                    .get("cron_expr")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: cron_expr"))?;
+                let skill_name = require_str(&params, "skill_name")?;
+                let cron_expr = require_str(&params, "cron_expr")?;
                 crate::schedule::add_async(skill_name, cron_expr).await
             }
             "remove" => {
-                let skill_name = params
-                    .get("skill_name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: skill_name"))?;
+                let skill_name = require_str(&params, "skill_name")?;
                 crate::schedule::remove_async(skill_name).await
             }
             "list" => crate::schedule::list_async().await,

@@ -4,7 +4,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{Tool, files};
+use super::{Tool, files, require_str};
 
 const OCR_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_MAX_ITEMS: u64 = 200;
@@ -108,10 +108,7 @@ impl Tool for OcrImageTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
+        let path = require_str(&params, "path")?;
         if path.trim().is_empty() {
             bail!("path must not be empty");
         }

@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
 
-use super::Tool;
+use super::{Tool, require_str};
 
 /// Normalize a path by resolving `.` and `..` components lexically (without
 /// touching the filesystem). This prevents traversal attacks that rely on
@@ -142,10 +142,7 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
+        let path = require_str(&params, "path")?;
 
         let validated = validate_path(path, &self.allowed_dirs)?;
 
@@ -187,15 +184,9 @@ impl Tool for WriteFileTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
+        let path = require_str(&params, "path")?;
 
-        let content = params
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: content"))?;
+        let content = require_str(&params, "content")?;
 
         let validated = validate_path(path, &self.allowed_dirs)?;
 
@@ -237,10 +228,7 @@ impl Tool for ListDirTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: path"))?;
+        let path = require_str(&params, "path")?;
 
         let validated = validate_path(path, &self.allowed_dirs)?;
 

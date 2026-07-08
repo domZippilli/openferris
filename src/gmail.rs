@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
@@ -7,8 +7,10 @@ use std::path::PathBuf;
 
 use openferris::config::GmailConfig;
 use openferris::email;
+use openferris::gws_cli;
 use openferris::protocol::{DaemonRequest, RequestKind};
 use openferris::storage::Storage;
+use openferris::text;
 
 use crate::client;
 
@@ -23,11 +25,6 @@ const THREAD_MSG_BODY_LEN: usize = 1500;
 /// Most recent prior messages from a thread to include as context. Bounds the
 /// context size on long threads; the agent compacts in-run as a further guard.
 const THREAD_MAX_PRIOR_MSGS: usize = 10;
-
-/// Timeout for a single `gws` subprocess invocation. Mirrors GWS_TIMEOUT in
-/// src/tools/gws.rs — without this, a hung `gws` process wedges the Gmail
-/// poll loop forever.
-const GWS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 // --- Persistent state ---
 
@@ -211,10 +208,12 @@ pub async fn run(
 
 /// Whether `e` looks like an expired/invalid Gmail auth error (as opposed to a
 /// transient or unrelated failure). Used to trigger the auth backoff instead
-/// of a normal error log, both at startup and in the poll loop.
+/// of a normal error log, both at startup and in the poll loop. Looks for a
+/// `GwsError` anywhere in the error's cause chain (even under `.context(...)`)
+/// and classifies based on its structured stdout/stderr rather than
+/// re-parsing a formatted message.
 fn is_auth_error(e: &anyhow::Error) -> bool {
-    let err_str = format!("{:#}", e);
-    err_str.contains("401") || err_str.contains("authError") || err_str.contains("invalid_grant")
+    gws_cli::find_gws_error(e).is_some_and(|g| g.is_auth_error())
 }
 
 async fn poll_once(
@@ -396,13 +395,9 @@ async fn process_message(
 
     // Truncate long emails
     let body = if body.len() > MAX_BODY_LEN {
-        let mut end = MAX_BODY_LEN;
-        while !body.is_char_boundary(end) {
-            end -= 1;
-        }
         format!(
             "{}\n\n[Email truncated — original was {} chars]",
-            &body[..end],
+            text::truncate_bytes(&body, MAX_BODY_LEN),
             body.len()
         )
     } else {
@@ -691,39 +686,41 @@ fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
-    let truncated: String = s.chars().take(max).collect();
-    format!("{}\n[…truncated]", truncated)
+    format!("{}\n[…truncated]", text::truncate_chars(s, max))
 }
 
 async fn run_gws(args: &[&str]) -> Result<serde_json::Value> {
-    let output = tokio::time::timeout(
-        GWS_TIMEOUT,
-        tokio::process::Command::new("gws")
-            .args(args)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("gws timed out after {:?}", GWS_TIMEOUT))?
-    .context("Failed to run gws")?;
+    let output = gws_cli::run(args).await.map_err(|e| {
+        // Preserve gmail.rs's original message format (includes the leading
+        // subcommand, untrimmed stdout). The structured GwsError is kept as
+        // the wrapped error's source via `.context`, so `is_auth_error` can
+        // still classify it downstream without re-parsing this string.
+        let msg = if let gws_cli::GwsError::NonZeroExit {
+            status,
+            stdout,
+            stderr,
+        } = &e
+        {
+            let stdout = String::from_utf8_lossy(stdout);
+            let stderr = String::from_utf8_lossy(stderr);
+            format!(
+                "gws {} exited with {}: {}{}",
+                args.first().unwrap_or(&""),
+                status,
+                stdout,
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{}", stderr)
+                }
+            )
+        } else {
+            e.to_string()
+        };
+        anyhow::Error::new(e).context(msg)
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "gws {} exited with {}: {}{}",
-            args.first().unwrap_or(&""),
-            output.status,
-            stdout,
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!("\n{}", stderr)
-            }
-        );
-    }
-
     serde_json::from_str(stdout.trim()).context("Failed to parse gws output as JSON")
 }
 

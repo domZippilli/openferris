@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
 
-use super::Tool;
+use super::{Tool, require_str};
 
 pub struct SendEmailTool {
     db_path: PathBuf,
@@ -42,20 +42,11 @@ impl Tool for SendEmailTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let to = params
-            .get("to")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: to"))?;
+        let to = require_str(&params, "to")?;
 
-        let subject = params
-            .get("subject")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: subject"))?;
+        let subject = require_str(&params, "subject")?;
 
-        let body = params
-            .get("body")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: body"))?;
+        let body = require_str(&params, "body")?;
 
         let param_cc = params.get("cc").and_then(|v| v.as_str());
         let content_type = params.get("content_type").and_then(|v| v.as_str());

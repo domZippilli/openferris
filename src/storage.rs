@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 use crate::llm::{ChatMessage, Role};
+use crate::text::truncate_bytes;
 
 pub struct Storage {
     conn: Connection,
@@ -47,17 +48,6 @@ pub fn now_local() -> String {
 /// delivered message rather than an ordinary assistant reply.
 pub fn outbound_tag(channel: &str, text: &str) -> String {
     format!("[sent via {}, {}] {}", channel, now_local(), text)
-}
-
-pub fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
-    }
-    let mut end = max_len;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 impl Storage {
@@ -156,13 +146,13 @@ impl Storage {
                 if source == "telegram" && skill.as_deref() == Some("send_telegram") {
                     ctx.push_str(&format!(
                         "Outbound Telegram message: {}\n\n",
-                        truncate(agent_msg, 2000)
+                        truncate_bytes(agent_msg, 2000)
                     ));
                 } else {
                     ctx.push_str(&format!(
                         "User: {}\nYou: {}\n\n",
-                        truncate(user_msg, 700),
-                        truncate(agent_msg, 2000)
+                        truncate_bytes(user_msg, 700),
+                        truncate_bytes(agent_msg, 2000)
                     ));
                 }
             }

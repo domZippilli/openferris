@@ -20,6 +20,39 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+/// Extract a required string parameter `key` from a tool's `params`, or fail
+/// with the standard "Missing required parameter: {key}" error every tool
+/// used to spell out by hand.
+pub fn require_str<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: {}", key))
+}
+
+/// Truncate `s` to at most `max_bytes` bytes (snapped back to the nearest
+/// char boundary so multi-byte UTF-8 is never split), appending a note that
+/// names `label` and reports the original and kept sizes. Used by tools that
+/// cap large output/response/document text before it goes back to the model,
+/// to avoid blowing up context. A no-op (returns `s` unchanged) when `s` is
+/// already within budget.
+pub fn truncate_for_context(mut s: String, max_bytes: usize, label: &str) -> String {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let original_len = s.len();
+    s.truncate(end);
+    s.push_str(&format!(
+        "\n\n[{} was {} bytes, truncated to {}]",
+        label, original_len, end
+    ));
+    s
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -167,5 +200,52 @@ impl ToolRegistry {
                 config.user.emails.clone(),
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn require_str_returns_value_when_present() {
+        let params = serde_json::json!({"prompt": "hello"});
+        assert_eq!(require_str(&params, "prompt").unwrap(), "hello");
+    }
+
+    #[test]
+    fn require_str_errors_when_missing() {
+        let params = serde_json::json!({});
+        let err = require_str(&params, "prompt").unwrap_err();
+        assert_eq!(err.to_string(), "Missing required parameter: prompt");
+    }
+
+    #[test]
+    fn require_str_errors_when_wrong_type() {
+        let params = serde_json::json!({"prompt": 5});
+        assert!(require_str(&params, "prompt").is_err());
+    }
+
+    #[test]
+    fn truncate_for_context_passthrough_when_within_budget() {
+        let s = "hello".to_string();
+        assert_eq!(truncate_for_context(s.clone(), 100, "output"), s);
+    }
+
+    #[test]
+    fn truncate_for_context_truncates_and_notes_sizes() {
+        let s = "a".repeat(100);
+        let result = truncate_for_context(s, 10, "output");
+        assert!(result.starts_with(&"a".repeat(10)));
+        assert!(result.contains("[output was 100 bytes, truncated to 10]"));
+    }
+
+    #[test]
+    fn truncate_for_context_snaps_to_char_boundary() {
+        // Each 'é' is 2 bytes; a max_bytes of 5 lands mid-char at byte 5.
+        let s = "ééééé".to_string(); // 10 bytes, 5 chars
+        let result = truncate_for_context(s, 5, "output");
+        // Should back off to the nearest char boundary (byte 4 = 2 chars).
+        assert!(result.contains("truncated to 4"));
     }
 }

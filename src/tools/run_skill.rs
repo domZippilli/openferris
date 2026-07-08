@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::Tool;
+use super::{Tool, require_str};
 use crate::agent::Agent;
 use crate::config::LlmConfig;
 use crate::llm::openai_compat::OpenAiCompatBackend;
@@ -59,10 +59,7 @@ impl Tool for RunSkillTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let skill_name = params
-            .get("skill_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: skill_name"))?;
+        let skill_name = require_str(&params, "skill_name")?;
 
         let context = params
             .get("context")

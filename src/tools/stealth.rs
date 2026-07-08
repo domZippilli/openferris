@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::Tool;
+use super::{Tool, require_str, truncate_for_context};
 
 const MAX_LEN: usize = 50_000;
 
@@ -51,10 +51,7 @@ impl Tool for StealthFetchTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<String> {
-        let url = params
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?;
+        let url = require_str(&params, "url")?;
         let wait_ms = params.get("wait_ms").and_then(|v| v.as_u64()).unwrap_or(0);
 
         let body = serde_json::json!({"url": url, "wait_ms": wait_ms});
@@ -74,22 +71,11 @@ impl Tool for StealthFetchTool {
 
         let parsed: FetchResp = response.json().await?;
 
-        let mut md = parsed.markdown;
-        let truncated_note = if md.len() > MAX_LEN {
-            let mut end = MAX_LEN;
-            while !md.is_char_boundary(end) {
-                end -= 1;
-            }
-            let original = md.len();
-            md.truncate(end);
-            format!("\n\n[Truncated — markdown was {} bytes]", original)
-        } else {
-            String::new()
-        };
+        let md = truncate_for_context(parsed.markdown, MAX_LEN, "markdown");
 
         Ok(format!(
-            "<{}> (status {}, {} bytes raw HTML)\n\n{}{}",
-            parsed.url, parsed.status, parsed.html_bytes, md, truncated_note
+            "<{}> (status {}, {} bytes raw HTML)\n\n{}",
+            parsed.url, parsed.status, parsed.html_bytes, md
         ))
     }
 }
