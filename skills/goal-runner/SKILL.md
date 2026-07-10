@@ -15,6 +15,8 @@ tools:
   - send_telegram
   - send_email
   - gws
+  - gws.calendar.list_events
+  - gws.calendar.get_event
   - gws.drive.download_file
   - gws.drive.download_file_to_path
   - journal_logs
