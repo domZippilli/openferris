@@ -2,7 +2,7 @@
 
 A reliable AI personal assistant that runs on Linux. Built with Unix philosophy: simple components, composed together, scheduled with cron. The guiding principle is reliability over features — do specific things, on time, every time, using markdown files, SQLite, and crontab entries instead of orchestration frameworks.
 
-OpenFerris uses a central daemon that owns the LLM session. Everything else — CLI commands, cron jobs, the TUI, the Telegram bot, the Gmail listener — are thin clients that send requests to the daemon over a Unix domain socket.
+OpenFerris uses a central daemon that owns the LLM session. Everything else — CLI commands, cron jobs, the TUI, the web chat, and the Gmail listener — are thin clients that send requests to the daemon over a Unix domain socket.
 
 ## Prerequisites
 
@@ -63,7 +63,7 @@ EOF
 chmod 600 ~/.config/openferris/config.toml
 ```
 
-`config.toml` holds secrets in plaintext once you add a Telegram bot token, so keep it `600`.
+Keep `config.toml` mode `600`, especially when it contains service credentials.
 
 Optionally, customize the agent's personality by placing a `SOUL.md` in `~/.config/openferris/`. A default is bundled into the binary. See [System prompt layers](#system-prompt-layers) for the other override files.
 
@@ -81,6 +81,15 @@ openferris daemon
 openferris tui
 ```
 
+Or use the private web interface from your tailnet:
+
+```bash
+openferris web
+tailscale serve --bg http://127.0.0.1:3030
+```
+
+Open the HTTPS URL printed by `tailscale serve`. The web service listens only on loopback by default; Tailscale provides tailnet access and HTTPS.
+
 **3. Run a skill:**
 
 ```bash
@@ -97,7 +106,7 @@ openferris schedule add daily-briefing "0 7 * * *"
 
 ## Running as systemd Services
 
-Production runs the daemon, the Telegram bot, and the Gmail listener as three separate user services grouped under one target, so each restarts independently on failure:
+Production runs the daemon, web chat, and Gmail listener as separate user services grouped under one target, so each restarts independently on failure:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -121,14 +130,15 @@ EOF
 ```
 
 ```bash
-cat > ~/.config/systemd/user/openferris-telegram.service << 'EOF'
+cat > ~/.config/systemd/user/openferris-web.service << 'EOF'
 [Unit]
-Description=OpenFerris Telegram bot
+Description=OpenFerris private web chat
 PartOf=openferris.target
+After=openferris-daemon.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/openferris telegram
+ExecStart=%h/.local/bin/openferris web
 Restart=on-failure
 RestartSec=5
 
@@ -158,7 +168,7 @@ EOF
 cat > ~/.config/systemd/user/openferris.target << 'EOF'
 [Unit]
 Description=OpenFerris services
-Wants=openferris-daemon.service openferris-telegram.service openferris-gmail.service
+Wants=openferris-daemon.service openferris-web.service openferris-gmail.service
 
 [Install]
 WantedBy=default.target
@@ -170,7 +180,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now openferris.target
 ```
 
-Only enable the telegram/gmail units if you've configured the matching `[telegram]`/`[gmail]` sections — both binaries exit immediately if their config section is missing (see [CLI](#cli)). Check status with `systemctl --user status openferris-daemon` (or `-telegram`/`-gmail`), and tail logs with `journalctl --user -u openferris-daemon -f` — or ask the agent itself via the `journal_logs` tool.
+The Gmail unit is optional and requires `[gmail]`. Check status with `systemctl --user status openferris-daemon` (or `-web`/`-gmail`). Expose the loopback web service once with `tailscale serve --bg http://127.0.0.1:3030`.
 
 For quick manual testing without systemd, `run.sh` at the repo root builds and runs all three foreground processes together; it's a dev convenience, not something to rely on for a real deployment (no restart-on-failure, one Ctrl-C kills everything).
 
@@ -178,8 +188,8 @@ For quick manual testing without systemd, `run.sh` at the repo root builds and r
 
 ```
 ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-│ CLI      │ │ Cron     │ │   TUI    │ │ Telegram/│   Thin clients
-│ commands │ │ jobs     │ │          │ │ Gmail    │   (send requests over
+│ CLI      │ │ Cron     │ │   TUI    │ │ Web/Gmail│   Thin clients
+│ commands │ │ jobs     │ │          │ │          │   (send requests over
 └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘   a Unix socket)
      └────────────┴─────────────┴────────────┘
                         v
@@ -193,15 +203,15 @@ For quick manual testing without systemd, `run.sh` at the repo root builds and r
 
 The daemon is the only process that talks to the LLM. All clients connect to it over a **Unix domain socket** (not TCP), send a JSON-line request, and receive one or more JSON-line responses (progress notifications, then a final result).
 
-The Telegram and Gmail listeners are deliberately separate processes: each one bridges exactly one channel, so adding a new channel means writing a new listener, not modifying the core.
+The web and Gmail services are deliberately separate processes: each bridges exactly one channel, so adding an interface does not require modifying the daemon.
 
 The socket path is `$XDG_RUNTIME_DIR/openferris.sock` by default (falls back to `~/.local/share/openferris/openferris.sock` if `$XDG_RUNTIME_DIR` is unset — e.g. under cron). Override it with `[daemon].socket` in config. The daemon also writes the socket path it actually bound to `~/.local/share/openferris/daemon.socket.path`; clients that can't reach the configured/default path (notably cron, which lacks `$XDG_RUNTIME_DIR`) fall back to reading that file. The socket file itself is created mode `0600`.
 
 ## How memory and autonomy work
 
-Every counterparty the agent talks to — you, or anyone else it emails — gets one continuous **message thread** stored in SQLite (`~/.local/share/openferris/openferris.db`, `messages` table), independent of which channel the conversation happens over. Your Telegram chat and your TUI session are the same thread (`owner`, resolved from `[telegram] allowed_users`/`default_chat_id` and `[user] emails`); a stranger who emails the agent gets their own `email:<address>` thread. History survives daemon restarts, and outbound sends (Telegram messages, emails) are recorded into the thread too, not just inbound chat — so if the agent tells you something via a scheduled run and you later ask "what did you send me earlier?", it's actually in context.
+Every counterparty the agent talks to — you, or anyone else it emails — gets one continuous **message thread** stored in SQLite (`~/.local/share/openferris/openferris.db`, `messages` table), independent of which channel the conversation happens over. Your web chat and TUI session share the `owner` thread; a stranger who emails the agent gets their own `email:<address>` thread. History survives daemon restarts, and outbound email is recorded in its thread too.
 
-Longer-running work is tracked as **goal files** at `workspace/goals/<slug>.md` rather than living only in a request string. A goal file carries its status (`active`/`done`/`abandoned`), a plan, a progress log, and a `next_check` timestamp. `openferris goal <exit criteria>` (or `/goal` in the TUI/Telegram) runs the `goal-pursuit` skill interactively for a bounded number of turns; the bundled `goal-runner` skill is the unattended heartbeat that picks up any goal whose `next_check` has passed. Schedule it once with:
+Longer-running work is tracked as **goal files** at `workspace/goals/<slug>.md` rather than living only in a request string. A goal file carries its status (`active`/`done`/`abandoned`), a plan, a progress log, and a `next_check` timestamp. `openferris goal <exit criteria>` (or `/goal` in the TUI/web chat) runs the `goal-pursuit` skill interactively for a bounded number of turns; the bundled `goal-runner` skill is the unattended heartbeat that picks up any goal whose `next_check` has passed. Schedule it once with:
 
 ```bash
 openferris schedule add goal-runner "0 */2 * * *"
@@ -229,7 +239,7 @@ Skills are markdown files that tell the agent what to do. They follow a `SKILL.m
 
 **Bundled skills:** `default` (freeform conversation), `daily-briefing`, `email-reply`, `goal-pursuit`, `goal-runner`.
 
-There is no global output router: a skill that needs to deliver its result calls a delivery tool (`send_telegram`, `send_email`) explicitly as part of its instructions.
+There is no global output router: a skill that needs to deliver its result calls a delivery tool such as `send_email` explicitly as part of its instructions.
 
 The `tools` field is a **focus mechanism, not a security boundary** — since the agent can create its own skills in the workspace, it can give itself access to any registered tool. The real security boundary is the tool registry: only tools compiled into the binary exist at all, and destructive operations within those tools (file writes outside allowed directories, `gws` deletes, unauthorized email recipients) are enforced by the tools themselves regardless of which skill invokes them.
 
@@ -247,7 +257,7 @@ Skill lookup order:
 | `openferris tui` | Interactive terminal chat session with the daemon |
 | `openferris run <skill>` | Run a named skill once (e.g. from cron) |
 | `openferris goal [--max-turns N] <exit criteria>` | Pursue a goal over multiple bounded inference turns |
-| `openferris telegram` | Start the Telegram bot listener (requires `[telegram]` in config) |
+| `openferris web [--listen 127.0.0.1:3030]` | Start the private web chat service |
 | `openferris gmail` | Start the Gmail listener (requires `[gmail]` in config) |
 | `openferris schedule add <skill> <cron_expr>` | Add a cron entry that runs a skill on a schedule |
 | `openferris schedule remove <skill>` | Remove a scheduled skill |
@@ -285,14 +295,13 @@ Tools are capabilities the agent can invoke. Each tool is a Rust module with a n
 | `web_search` | `[search]` | Search the web via a SearXNG-compatible endpoint |
 | `scrape_url` | `[firecrawl]` | Scrape a page via Firecrawl, returning clean markdown |
 | `stealth_fetch` | `[camoufox]` | Fetch via Camoufox (stealth Firefox) for bot-detection-heavy sites — last resort in the `fetch_url` → `scrape_url` → `stealth_fetch` ladder |
-| `send_telegram` | `[telegram]` | Send a Telegram message; outbound sends are logged to the recipient's thread |
 | `send_email` | `[gmail]` | Send an email via Gmail; recipient (and any `cc`) must be in `allowed_senders` or a previously-emailed contact |
 
 **Registered only when `[llm].parallel_slots > 1`:**
 
 | Tool | Purpose |
 |---|---|
-| `run_skill` | Run another skill as a subagent (its own slot, own context) and return the result as text. Delivery tools (`send_telegram`/`send_email`) are stripped from the subagent — the caller must deliver the result itself. |
+| `run_skill` | Run another skill as a subagent (its own slot, own context) and return the result as text. Delivery tools such as `send_email` are stripped from the subagent — the caller must deliver the result itself. |
 
 File tools (`read_file`, `write_file`, `list_dir`, `ocr_image`, `gws.drive.download_file_to_path`) are restricted to `~/.local/share/openferris/workspace/` plus any directories added in config:
 
@@ -348,12 +357,6 @@ endpoint = "http://127.0.0.1:3002"  # Firecrawl API base
 [camoufox]
 endpoint = "http://127.0.0.1:8765"  # Camoufox stealth-fetch API base
 
-# Optional — enables `openferris telegram` and the send_telegram tool.
-[telegram]
-bot_token = "123:ABC..."          # Required
-allowed_users = [123456789]        # Telegram user/chat IDs allowed to use the bot; empty = anyone
-default_chat_id = 123456789        # Default chat for skill-initiated/outbound messages
-
 # Optional — enables `openferris gmail` and the send_email tool.
 [gmail]
 allowed_senders = ["me@example.com"]  # Addresses allowed to trigger auto-replies / be emailed
@@ -364,17 +367,15 @@ always_cc = "archive@example.com"     # Optional address always CC'd on outbound
 
 `OPENFERRIS_LLM_TEMPERATURE` and `OPENFERRIS_LLM_TOP_K` override the configured sampling values for quick experiments.
 
-`config.toml` contains the Telegram bot token in plaintext once configured — `chmod 600` it.
-
 ## Current Features
 
 - Central daemon over a Unix domain socket, serializing all LLM access through one agent loop
-- Streaming responses with live progress notifications to clients (TUI, Telegram)
+- Streaming responses with live progress notifications to clients (TUI, web)
 - Per-counterparty SQLite message threads shared across every channel, surviving restarts
 - Persistent goal files with an unattended cron heartbeat (`goal-runner`) and an independent done-claim evaluator
 - One-shot scheduled wakeups (`set_wakeup`) on a ~60s daemon tick
 - Skill system (AgentSkills-style `SKILL.md`) with per-skill tool allowlists, user/workspace/bundled lookup layers, and subagent delegation (`run_skill`) when `parallel_slots > 1`
-- Telegram and Gmail listeners with allowlisting, rate limiting, and thread-aware replies
+- Tailnet-ready web chat and a Gmail listener with allowlisting, rate limiting, and thread-aware replies
 - Web tooling ladder: `fetch_url` (SSRF-guarded) → `scrape_url` (Firecrawl) → `stealth_fetch` (Camoufox), plus `web_search` (SearXNG)
 - Google Workspace integration via `gws` (Drive/Gmail/Calendar/etc.) with destructive operations blocked by default
 - OCR, ask_claude/ask_codex subagent tools, and journalctl log access for self-diagnosis

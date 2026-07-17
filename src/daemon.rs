@@ -59,29 +59,8 @@ const WAKEUP_TICK_INTERVAL: Duration = Duration::from_secs(60);
 /// opposed to one that arrived from a client connection.
 const WAKEUP_SOURCE: &str = "wakeup";
 
-/// Resolve the DB-thread counterparty for a `FreeformMessage`'s session_id.
-///
-/// TUI sessions (`tui:<uuid>`) and anything else not recognized below are
-/// treated as the owner — the only two owner-facing interactive surfaces
-/// today are Telegram and the TUI, and the TUI has no per-chat identity to
-/// check. Telegram sessions encode the chat_id as `telegram:<chat_id>` and
-/// resolve through the configured allowlist/default chat (see
-/// `openferris::counterparty::telegram_counterparty`); by the time a message
-/// reaches the daemon the transport has usually already rejected
-/// non-allowlisted chats, so this mostly resolves to the owner too.
-fn resolve_counterparty(session_id: &str, config: &AppConfig) -> String {
-    if let Some(chat_id_str) = session_id.strip_prefix("telegram:") {
-        if let (Ok(chat_id), Some(tg)) = (chat_id_str.parse::<i64>(), config.telegram.as_ref()) {
-            return counterparty::telegram_counterparty(
-                chat_id,
-                tg.default_chat_id,
-                &tg.allowed_users,
-            );
-        }
-        // No [telegram] config or an unparseable chat id: still bucket by
-        // chat rather than defaulting to the owner thread.
-        return format!("telegram:{}", chat_id_str);
-    }
+/// Resolve owner-facing web and TUI sessions to the owner's message thread.
+fn resolve_counterparty(_session_id: &str) -> String {
     counterparty::OWNER.to_string()
 }
 
@@ -193,12 +172,9 @@ async fn run_with_wakeup_tick(
     let worker_agent = agent.clone();
     let user_skills_dir = config::config_dir().join("skills");
     tokio::spawn(async move {
-        // `config` moves in wholesale: the worker needs `config.telegram` to
-        // resolve counterparties (see `resolve_counterparty`). Conversation
-        // history itself now lives in `storage`'s `messages` table, keyed by
+        // Conversation history lives in `storage`'s `messages` table, keyed by
         // counterparty rather than transport session — it survives daemon
         // restarts and is shared across channels for the same counterparty.
-        let config = config;
         while let Some(queued) = rx.recv().await {
             let request_id = queued.request.id.clone();
 
@@ -248,7 +224,7 @@ async fn run_with_wakeup_tick(
             let user_profile = config::load_user();
 
             // Conversation continuity: only freeform messages from an owner
-            // surface (Telegram, TUI) thread together, keyed by the resolved
+            // owner surface (web, TUI) thread together, keyed by the resolved
             // counterparty rather than the raw session_id — so the same
             // person is coherent across channels, and restarts don't wipe it.
             let counterparty: Option<String> = match &queued.request.kind {
@@ -256,7 +232,7 @@ async fn run_with_wakeup_tick(
                     .request
                     .session_id
                     .as_deref()
-                    .map(|sid| resolve_counterparty(sid, &config)),
+                    .map(resolve_counterparty),
                 _ => None,
             };
 
@@ -577,7 +553,7 @@ fn wakeup_context(due_ts: &str, note: &str) -> String {
         "This is an automated wakeup you (or a prior run) scheduled earlier via set_wakeup, \
          originally due {}. Nobody is chatting with you right now — there is no message to \
          reply to. Act on the note below directly: do the work it describes, and use \
-         send_telegram/send_email yourself if the owner needs to be told something. The note \
+         send_email yourself if the owner needs to be told something. The note \
          is the only context you have; nothing else about why it was set is available.\n\n\
          Wakeup note: {}",
         due_ts, note
@@ -981,10 +957,6 @@ mod tests {
     use openferris::tools::ToolRegistry;
     use std::sync::Arc;
 
-    /// Resolver tests for `resolve_counterparty`. The Telegram/email-specific
-    /// mapping rules themselves are covered in `openferris::counterparty`'s
-    /// own tests; this only checks the session_id-parsing glue that's local
-    /// to the daemon.
     fn minimal_config(socket: String) -> AppConfig {
         AppConfig {
             user: UserConfig {
@@ -1007,27 +979,13 @@ mod tests {
             search: None::<SearchConfig>,
             firecrawl: None::<FirecrawlConfig>,
             camoufox: None::<CamoufoxConfig>,
-            telegram: None,
             gmail: None,
         }
     }
 
     #[test]
     fn test_resolve_counterparty_tui_is_owner() {
-        let config = minimal_config("/tmp/unused.sock".to_string());
-        assert_eq!(
-            resolve_counterparty("tui:some-uuid", &config),
-            counterparty::OWNER
-        );
-    }
-
-    #[test]
-    fn test_resolve_counterparty_telegram_without_config_buckets_by_chat() {
-        let config = minimal_config("/tmp/unused.sock".to_string());
-        assert_eq!(
-            resolve_counterparty("telegram:555", &config),
-            "telegram:555"
-        );
+        assert_eq!(resolve_counterparty("tui:some-uuid"), counterparty::OWNER);
     }
 
     #[test]
@@ -1090,8 +1048,7 @@ mod tests {
     }
 
     /// End-to-end: an outbound send that landed in the owner's thread before
-    /// this turn started (simulating what `send_telegram`/`send_email` append
-    /// on every delivery — see tools/telegram.rs, email.rs) is visible to the
+    /// this turn started (simulating what a delivery tool appends) is visible to the
     /// LLM as history on the *next* FreeformMessage from an owner surface.
     /// This is the coherence bug from the refactor plan: previously, only the
     /// in-memory per-session_id history fed the model, so a prior outbound
@@ -1103,7 +1060,7 @@ mod tests {
         let socket_path = tmp.path().join("daemon.sock");
 
         let storage = Storage::open(&db_path).unwrap();
-        // Simulate a prior send_telegram call: an outbound chat turn in the
+        // Simulate a legacy outbound delivery: an outbound chat turn in the
         // owner thread, with no FreeformMessage round trip involved at all.
         storage
             .append_message(
@@ -1186,7 +1143,7 @@ mod tests {
         storage
             .add_wakeup(
                 "2020-01-01 00:00:00",
-                "Check the openferris.org DNS propagated and tell the owner via Telegram.",
+                "Check the openferris.org DNS propagated and tell the owner via email.",
             )
             .unwrap();
 

@@ -46,13 +46,12 @@ skill is invoked. Be specific about what you want the agent to do.
 - `stealth_fetch` — Fetch a web page through Camoufox (stealth Firefox with anti-fingerprinting) and return clean markdown. Params: `{"url": "...", "wait_ms": <optional int, 0-15000>}`. Use only when fetch_url and scrape_url are blocked, rate-limited, or returning bot-detection pages; slow (~2-10s per call) and resource-heavy, so reach for it last in the fetch_url -> scrape_url -> stealth_fetch ladder.
 - `schedule` — Manage cron-based skill schedules. Params: `{"action": "add|remove|list", "skill_name": "...", "cron_expr": "..."}`
 - `set_wakeup` — Schedule a one-shot wakeup: at the given time (within about a minute), a fresh agent run fires with your note as its only instruction. Params: `{"action": "add", "due": "YYYY-MM-DD HH:MM", "note": "..."}` (self-contained instruction; `due` is in the user's configured timezone and must be in the future), `{"action": "list"}`, or `{"action": "cancel", "id": <number>}`. Use for a precise-time or non-recurring follow-up ("remind me at 9"); use `schedule` for recurring cadences and the goal file's `next_check` for per-goal pacing.
-- `send_telegram` — Send a message via Telegram. Params: `{"message": "...", "chat_id": <optional>}`
 - `send_email` — Send an email via Gmail. Params: `{"to": "...", "subject": "...", "body": "..."}`. Recipient must be in allowed contacts or a known contact.
 - `gws` — Run a Google Workspace CLI command. Params: `{"command": "..."}`. Destructive operations (delete, trash, send, empty, remove) are blocked by default. If `[gws].allow_drive_file_deletes = true`, `drive files delete` and `drive files trash` are allowed. Use send_email to send emails.
 - `gws.drive.download_file` — Download a small uploaded image file from Google Drive as base64. Params: `{"file_id": "...", "max_bytes": <optional>, "mime_type_allowlist": <optional>}`. Supports JPEG, PNG, WebP, GIF, BMP, and TIFF up to 1 MB. Prefer `gws.drive.download_file_to_path` for normal images.
 - `gws.drive.download_file_to_path` — Download an uploaded image file from Google Drive to a workspace path without returning file bytes. Params: `{"file_id": "...", "destination_path": "...", "max_bytes": <optional>, "mime_type_allowlist": <optional>}`. Supports JPEG, PNG, WebP, GIF, BMP, and TIFF up to 20 MB.
 - `journal_logs` — View OpenFerris service logs from journalctl. Params: `{"lines": <optional number, default 50>, "unit": <optional string, default "openferris*">, "since": <optional string, e.g. "1h", "30m", "today">}`. Returns the most recent log lines for matching systemd units; use to check service health, debug errors, or review recent activity.
-- `run_skill` — Run another skill as a subagent and return its result as text. Delivery tools are disabled inside the subagent, so `run_skill` never sends email, Telegram messages, or other external delivery by itself. The caller must explicitly use `send_email`, `send_telegram`, or another delivery tool after `run_skill` returns.
+- `run_skill` — Run another skill as a subagent and return its result as text. Delivery tools are disabled inside the subagent, so `run_skill` never sends email or other external delivery by itself. The caller must explicitly use `send_email` or another delivery tool after `run_skill` returns.
 - `ask_claude` — Ask Claude Code for help. Params: `{"prompt": "..."}`
 - `ask_codex` — Ask Codex for help. Params: `{"prompt": "..."}`
 
@@ -108,7 +107,7 @@ If a previous entry exists for today, append to it rather than overwriting.
 ## How Skills Are Invoked
 
 - **By name:** `openferris run my-skill`
-- **Bounded goal mode:** `openferris goal --max-turns 5 <exit criteria>` or `/goal --max-turns 5 <exit criteria>` in the TUI/Telegram
+- **Bounded goal mode:** `openferris goal --max-turns 5 <exit criteria>` or `/goal --max-turns 5 <exit criteria>` in the TUI/web chat
 - **Via cron:** `0 7 * * * openferris run daily-briefing`
 - **Freeform messages** use the `default` skill automatically.
 

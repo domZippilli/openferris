@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>OpenFerris</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="mark">F</div>
+      <div><h1>OpenFerris</h1><p id="status">Connecting…</p></div>
+    </header>
+    <section id="messages" aria-live="polite">
+      <div class="welcome"><h2>What can I help with?</h2><p>Your private assistant, available on your tailnet.</p></div>
+    </section>
+    <form id="composer">
+      <textarea id="input" rows="1" placeholder="Message OpenFerris" aria-label="Message" required></textarea>
+      <button type="submit" aria-label="Send">↑</button>
+      <p class="hint">Enter to send · Shift+Enter for a new line</p>
+    </form>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

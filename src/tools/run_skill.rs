@@ -50,8 +50,8 @@ impl Tool for RunSkillTool {
          Parameters: {\"skill_name\": \"<name>\", \"context\": \"<optional extra instructions or data>\"}. \
          Use this to delegate tasks to specialized skills like daily-briefing, email-reply, etc. \
          The subagent does the work (fetching, parsing, formatting) and returns the result to you. \
-         Delivery tools are disabled inside the subagent: run_skill itself never sends email, Telegram messages, or other external delivery, even if the delegated skill normally would. \
-         If the result needs to be delivered, you must explicitly call send_email, send_telegram, or another delivery tool yourself after run_skill returns. \
+         Delivery tools are disabled inside the subagent: run_skill itself never sends email or other external delivery, even if the delegated skill normally would. \
+         If the result needs to be delivered, you must explicitly call send_email or another delivery tool yourself after run_skill returns. \
          Do not claim a delegated skill was delivered unless you personally called the delivery tool and it succeeded."
     }
 
@@ -67,7 +67,7 @@ impl Tool for RunSkillTool {
 
         // Load the skill and strip delivery tools — the parent handles delivery.
         let mut skill = skills::load_skill(skill_name, &self.skills_dir)?;
-        const DELIVERY_TOOLS: &[&str] = &["send_telegram", "send_email"];
+        const DELIVERY_TOOLS: &[&str] = &["send_email"];
         skill
             .tools
             .retain(|t| !DELIVERY_TOOLS.contains(&t.as_str()));

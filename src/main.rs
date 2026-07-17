@@ -2,8 +2,8 @@ mod client;
 mod daemon;
 mod gmail;
 mod memories;
-mod telegram;
 mod tui;
+mod web;
 
 use openferris::{agent, config, llm, schedule, skills, storage, tools};
 
@@ -55,8 +55,12 @@ enum Commands {
         #[arg(required = true, trailing_var_arg = true)]
         exit_criteria: Vec<String>,
     },
-    /// Start the Telegram bot listener
-    Telegram,
+    /// Start the private web chat interface
+    Web {
+        /// Address to listen on (use loopback with `tailscale serve`)
+        #[arg(long, default_value = "127.0.0.1:3030")]
+        listen: String,
+    },
     /// Start the Gmail listener
     Gmail,
     /// Manage scheduled skill invocations via cron
@@ -124,11 +128,8 @@ async fn main() -> Result<()> {
         Commands::Tui => {
             tui::run(&config.daemon.socket).await?;
         }
-        Commands::Telegram => {
-            let tg_config = config.telegram.clone().ok_or_else(|| {
-                anyhow::anyhow!("No [telegram] section in config.toml. Add bot_token to enable.")
-            })?;
-            telegram::run(config.daemon.socket.clone(), tg_config).await?;
+        Commands::Web { listen } => {
+            web::run(config.daemon.socket.clone(), &listen).await?;
         }
         Commands::Gmail => {
             let gmail_config = config.gmail.clone().ok_or_else(|| {

@@ -11,7 +11,6 @@ pub mod scrape;
 pub mod search;
 pub mod send_email;
 pub mod stealth;
-pub mod telegram;
 pub mod wakeup;
 pub mod web;
 
@@ -172,33 +171,16 @@ impl ToolRegistry {
         if let Some(ref c) = config.camoufox {
             self.register(Box::new(stealth::StealthFetchTool::new(c.endpoint.clone())));
         }
-
-        if let Some(ref tg) = config.telegram {
-            self.register(Box::new(telegram::SendTelegramTool::new(
-                tg.bot_token.clone(),
-                tg.default_chat_id,
-                tg.allowed_users.clone(),
-            )));
-        }
     }
 
     /// Register tools that need access to the database.
     pub fn register_db_tools(&mut self, db_path: std::path::PathBuf, config: &AppConfig) {
         // Unconditional: set_wakeup needs Storage but no external service
-        // config, unlike the Telegram/Gmail delivery tools below.
+        // config, unlike the Gmail delivery tool below.
         self.register(Box::new(wakeup::SetWakeupTool::new(
             db_path.clone(),
             config.user.timezone.clone(),
         )));
-
-        if let Some(ref tg) = config.telegram {
-            self.register(Box::new(telegram::SendTelegramTool::new_with_storage(
-                tg.bot_token.clone(),
-                tg.default_chat_id,
-                tg.allowed_users.clone(),
-                db_path.clone(),
-            )));
-        }
 
         if let Some(ref gmail) = config.gmail {
             self.register(Box::new(send_email::SendEmailTool::new(

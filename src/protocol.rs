@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 pub struct DaemonRequest {
     pub id: String,
     pub kind: RequestKind,
-    /// Where this request originated from (e.g., "tui", "cli", "telegram").
+    /// Where this request originated from (e.g., "tui", "cli", "web").
     #[serde(default)]
     pub source: Option<String>,
     /// Stable conversation key. Freeform messages sharing a `session_id` are
     /// threaded together so the agent sees prior turns even across separate
-    /// daemon connections (e.g. Telegram opens a new connection per message).
+    /// daemon connections (e.g. the web client opens a new connection per message).
     /// `None` means a one-shot request with no conversational continuity.
     #[serde(default)]
     pub session_id: Option<String>,
@@ -69,10 +69,8 @@ pub enum AgentNotification {
     AssistantChunk(String),
 }
 
-/// Parse a `/goal [--max-turns N] <exit criteria>` command body (the text
-/// after the `/goal ` prefix) into the `(max_turns, exit_criteria)` pair
-/// used to build a [`RequestKind::PursueGoal`]. Shared by the Telegram and
-/// TUI clients, which expose the same `/goal` command.
+/// Parse a `/goal [--max-turns N] <exit criteria>` command body into the
+/// `(max_turns, exit_criteria)` pair used by the web and TUI clients.
 pub fn parse_goal_args(input: &str) -> Result<(usize, String), String> {
     let mut parts = input.split_whitespace().peekable();
     let mut max_turns = 5usize;
@@ -121,7 +119,6 @@ pub fn tool_progress_label(tool_name: &str) -> &'static str {
         "journal_logs" => "Reading system logs...",
         "ask_claude" => "Thinking harder...",
         "ask_codex" => "Asking Codex...",
-        "send_telegram" => "Sending a Telegram message...",
         "send_email" => "Sending an email...",
         "run_skill" => "Running a sub-task...",
         _ => "Working...",

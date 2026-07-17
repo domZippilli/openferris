@@ -442,7 +442,7 @@ impl Agent {
         prompt.push_str("When the user tells you something worth remembering across conversations — preferences, names, important facts, standing instructions — save it with a <memory> tag:\n\n");
         prompt.push_str("<memory>The user's name is Alex</memory>\n\n");
         prompt.push_str("Only save genuinely important, durable facts. Don't save transient details or task-specific information.\n");
-        prompt.push_str("Your saved memories persist across all interfaces (TUI, Telegram, etc.) and all future interactions.\n");
+        prompt.push_str("Your saved memories persist across all interfaces (web, TUI, etc.) and all future interactions.\n");
 
         prompt
     }
@@ -943,11 +943,11 @@ mod tests {
     #[test]
     fn test_parse_tool_call_missing_one_brace() {
         let text = r#"<tool_call>
-{"function": "send_telegram", "parameters": {"message": "hello"}
+{"function": "send_email", "parameters": {"message": "hello"}
 </tool_call>"#;
         let outcome = parse_tool_calls(text);
         assert_eq!(outcome.calls.len(), 1);
-        assert_eq!(outcome.calls[0].name, "send_telegram");
+        assert_eq!(outcome.calls[0].name, "send_email");
         assert!(
             outcome.calls[0]
                 .repair_note
@@ -961,10 +961,10 @@ mod tests {
     #[test]
     fn test_parse_tool_call_missing_two_braces() {
         let text = r#"<tool_call>
-{"function": "send_telegram", "parameters": {"message": "hello"
+{"function": "send_email", "parameters": {"message": "hello"
 </tool_call>"#;
         let outcome = parse_tool_calls(text);
         assert_eq!(outcome.calls.len(), 1);
-        assert_eq!(outcome.calls[0].name, "send_telegram");
+        assert_eq!(outcome.calls[0].name, "send_email");
     }
 }

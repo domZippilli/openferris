@@ -12,7 +12,6 @@ tools:
   - scrape_url
   - stealth_fetch
   - set_wakeup
-  - send_telegram
   - send_email
   - gws
   - gws.calendar.list_events
@@ -67,7 +66,7 @@ If blocked on missing input from the owner, say exactly what's needed. If the bl
 
 ## Messaging the owner
 
-Send a Telegram message or email (`send_telegram`/`send_email`) when there's something worth telling the owner: the goal finished, it's blocked and needs their input, or a real milestone landed. Don't send an update every run -- a small step forward is just a file update, not a message. Keep updates short.
+Send an email (`send_email`) when there's something worth telling the owner: the goal finished, it's blocked and needs their input, or a real milestone landed. Don't send an update every run -- a small step forward is just a file update, not a message. Keep updates short.
 
 ## Scheduling
 

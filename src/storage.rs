@@ -43,8 +43,8 @@ pub fn now_local() -> String {
 }
 
 /// Build the `[sent via <channel>, <timestamp>] <text>` tag prefixed onto
-/// outbound thread turns logged by delivery tools (send_telegram, send_email,
-/// Gmail auto-replies), so the thread makes clear these lines were an actual
+/// outbound thread turns logged by delivery tools (including legacy Telegram
+/// records and current Gmail auto-replies), so the thread makes clear these lines were an actual
 /// delivered message rather than an ordinary assistant reply.
 pub fn outbound_tag(channel: &str, text: &str) -> String {
     format!("[sent via {}, {}] {}", channel, now_local(), text)
@@ -530,7 +530,7 @@ mod tests {
         let s = temp_storage();
         s.append_message("owner", "tui", DIRECTION_INBOUND, KIND_CHAT, "Question")
             .unwrap();
-        // Two outbound sends with no reply in between (e.g. two send_telegram
+        // Two legacy outbound sends with no reply in between
         // calls in the same run, or a run's send followed by a later notify).
         s.append_message(
             "owner",

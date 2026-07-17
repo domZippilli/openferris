@@ -1,6 +1,6 @@
 //! Shared text-truncation primitives.
 //!
-//! Several call sites (storage, the Gmail listener, the Telegram client) each
+//! Several call sites (storage and the Gmail listener) each
 //! grew their own copy of a "truncate this string so it doesn't blow up
 //! context/a message limit" loop, with byte- and char-based semantics mixed
 //! together under similar-sounding names. This module centralizes the two

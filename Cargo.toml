@@ -20,6 +20,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.33", features = ["bundled"] }
 dirs = "6"
 anyhow = "1"
+axum = "0.8"
 base64 = "0.22"
 url = "2"
 serde_yaml_ng = "0.10.0"

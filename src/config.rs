@@ -17,7 +17,6 @@ pub struct AppConfig {
     pub search: Option<SearchConfig>,
     pub firecrawl: Option<FirecrawlConfig>,
     pub camoufox: Option<CamoufoxConfig>,
-    pub telegram: Option<TelegramConfig>,
     pub gmail: Option<GmailConfig>,
 }
 
@@ -112,16 +111,6 @@ impl Default for DaemonConfig {
             socket: default_socket(),
         }
     }
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct TelegramConfig {
-    pub bot_token: String,
-    /// Telegram user IDs allowed to use the bot. If empty, anyone can use it.
-    #[serde(default)]
-    pub allowed_users: Vec<u64>,
-    /// Default chat ID for outbound messages (e.g., skill-initiated notifications).
-    pub default_chat_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -273,7 +262,6 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "search",
     "firecrawl",
     "camoufox",
-    "telegram",
     "gmail",
 ];
 
@@ -301,13 +289,6 @@ fn warn_unknown_keys(content: &str) {
 /// Warn about configurations that parse fine but are probably not what the
 /// user wants.
 fn warn_config_footguns(config: &AppConfig) {
-    if let Some(tg) = &config.telegram
-        && tg.allowed_users.is_empty()
-    {
-        tracing::warn!(
-            "[telegram] is configured with empty allowed_users — anyone can message the bot"
-        );
-    }
     if config.gmail.is_some() && config.user.emails.is_empty() {
         tracing::warn!(
             "[gmail] is configured but [user] emails is empty — the owner's email address \
