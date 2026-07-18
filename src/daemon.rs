@@ -170,10 +170,47 @@ async fn run_with_wakeup_tick(
     // Single worker task — processes requests sequentially, owns storage and memories.
     let worker_agent = agent.clone();
     let user_skills_dir = config::config_dir().join("skills");
+    let warm_cache = config.daemon.warm_cache;
     tokio::spawn(async move {
         // Conversation history lives in `storage`'s `messages` table, keyed by
         // counterparty rather than transport session — it survives daemon
         // restarts and is shared across channels for the same counterparty.
+        if warm_cache {
+            let started = std::time::Instant::now();
+            let result = match worker_agent.context_window_tokens().await {
+                Ok(context_window) => {
+                    let token_budget = (((context_window as f32) * HISTORY_TOKEN_FRACTION)
+                        as usize)
+                        .min(MAX_HISTORY_TOKEN_BUDGET);
+                    match storage
+                        .load_thread(counterparty::OWNER, token_budget * CHARS_PER_TOKEN_ESTIMATE)
+                    {
+                        Ok(history) => {
+                            warm_interactive_cache(
+                                &worker_agent,
+                                history,
+                                &memories,
+                                &user_skills_dir,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Interactive KV cache warmed"
+                ),
+                Err(error) => tracing::warn!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Interactive KV cache warm-up failed; continuing: {error:#}"
+                ),
+            }
+        }
+
         while let Some(queued) = rx.recv().await {
             let request_id = queued.request.id.clone();
 
@@ -487,6 +524,27 @@ async fn run_with_wakeup_tick(
             }
         });
     }
+}
+
+async fn warm_interactive_cache(
+    agent: &Agent,
+    history: Vec<ChatMessage>,
+    memories: &Memories,
+    user_skills_dir: &Path,
+) -> Result<()> {
+    let skill = skills::load_skill("default", user_skills_dir)?;
+    let memory_context = memories.load_for_prompt()?;
+    let user_profile = config::load_user();
+    agent
+        .warm_cache(
+            &skill,
+            &history,
+            PromptContext {
+                user_profile: &user_profile,
+                persistent_context: &memory_context,
+            },
+        )
+        .await
 }
 
 /// Poll `db_path` for pending wakeups whose `due_ts` has passed and enqueue
@@ -987,7 +1045,10 @@ mod tests {
                 enable_thinking: false,
                 parallel_slots: 1,
             },
-            daemon: DaemonConfig { socket },
+            daemon: DaemonConfig {
+                socket,
+                warm_cache: false,
+            },
             files: FilesConfig::default(),
             fetch: FetchConfig::default(),
             gws: GwsConfig::default(),

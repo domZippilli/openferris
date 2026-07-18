@@ -109,14 +109,22 @@ pub struct DaemonConfig {
     /// Path to the Unix domain socket.
     #[serde(default = "default_socket")]
     pub socket: String,
+    /// Prefill the interactive owner-thread prefix when the daemon starts.
+    #[serde(default = "default_warm_cache")]
+    pub warm_cache: bool,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             socket: default_socket(),
+            warm_cache: default_warm_cache(),
         }
     }
+}
+
+fn default_warm_cache() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]

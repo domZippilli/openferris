@@ -160,7 +160,12 @@ impl OpenAiCompatBackend {
     /// streaming completion paths; `stream` is the only field that differs
     /// between callers. Borrows message content straight from `messages`
     /// rather than cloning it.
-    fn build_request<'a>(&self, messages: &'a [ChatMessage], stream: bool) -> ChatRequest<'a> {
+    fn build_request<'a>(
+        &self,
+        messages: &'a [ChatMessage],
+        stream: bool,
+        max_tokens: Option<i32>,
+    ) -> ChatRequest<'a> {
         let api_messages: Vec<ApiMessage<'a>> = messages
             .iter()
             .map(|m| ApiMessage {
@@ -173,7 +178,7 @@ impl OpenAiCompatBackend {
             model: self.model.clone().unwrap_or_else(|| "default".to_string()),
             messages: api_messages,
             id_slot: Some(self.slot),
-            max_tokens: None,
+            max_tokens,
             temperature: self.temperature,
             top_k: self.top_k,
             stream,
@@ -251,7 +256,7 @@ struct ModelEntry {
 #[async_trait]
 impl LlmBackend for OpenAiCompatBackend {
     async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
-        let request = self.build_request(messages, false);
+        let request = self.build_request(messages, false, None);
         let response = self.post_chat(&request).await?;
 
         let chat_response: ChatResponse = response
@@ -285,7 +290,7 @@ impl LlmBackend for OpenAiCompatBackend {
         messages: &[ChatMessage],
         on_chunk: ChunkCallback<'_>,
     ) -> Result<String> {
-        let request = self.build_request(messages, true);
+        let request = self.build_request(messages, true, None);
         let response = self.post_chat(&request).await?;
 
         let mut stream = response.bytes_stream();
@@ -375,6 +380,19 @@ impl LlmBackend for OpenAiCompatBackend {
         }
 
         Ok(accumulated)
+    }
+
+    async fn warm_cache(&self, messages: &[ChatMessage]) -> Result<()> {
+        let request = self.build_request(messages, false, Some(1));
+        let response = self.post_chat(&request).await?;
+        // A one-token reasoning completion may legitimately carry
+        // `content: null`. The output is intentionally discarded; consuming
+        // the status-checked body is enough to complete cache population.
+        response
+            .bytes()
+            .await
+            .context("Failed to consume cache warm-up response")?;
+        Ok(())
     }
 
     async fn context_window_tokens(&self) -> Result<usize> {

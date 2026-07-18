@@ -58,6 +58,35 @@ impl Agent {
         self.llm.context_window_tokens().await
     }
 
+    /// Prefill the backend's KV cache with the exact stable interactive
+    /// prefix. The disposable final user message is never persisted.
+    pub async fn warm_cache(
+        &self,
+        skill: &Skill,
+        history: &[ChatMessage],
+        prompt: PromptContext<'_>,
+    ) -> Result<()> {
+        let mut messages = vec![ChatMessage {
+            role: Role::System,
+            content: self.build_system_prompt(
+                skill,
+                prompt.user_profile,
+                prompt.persistent_context,
+            ),
+        }];
+        messages.extend_from_slice(history);
+        messages.push(ChatMessage {
+            role: Role::User,
+            content: "Hello".to_string(),
+        });
+        tracing::info!(
+            estimated_prompt_tokens = estimate_tokens(&messages),
+            history_messages = history.len(),
+            "Warming interactive KV cache"
+        );
+        self.llm.warm_cache(&messages).await
+    }
+
     /// Bare chat completion, bypassing the tool-calling loop, system prompt
     /// assembly, and compaction entirely. For small, self-contained auxiliary
     /// calls that are not a full agent run — currently only the goal-pursuit

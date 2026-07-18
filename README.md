@@ -335,6 +335,7 @@ parallel_slots = 1                # >1 enables the run_skill subagent tool (pare
 # Optional — omit the whole [daemon] table to use the default socket path.
 [daemon]
 socket = "/run/user/1000/openferris.sock"  # Unix socket path; defaults to $XDG_RUNTIME_DIR/openferris.sock
+warm_cache = true                           # Prefill interactive KV cache at daemon startup (default true)
 
 # Optional.
 [files]

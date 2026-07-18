@@ -35,6 +35,13 @@ pub type ChunkCallback<'a> = &'a mut (dyn FnMut(&str) + Send);
 pub trait LlmBackend: Send + Sync {
     async fn chat_completion(&self, messages: &[ChatMessage]) -> anyhow::Result<String>;
 
+    /// Populate any backend prefix/KV cache while minimizing decode work.
+    /// Backends without a specialized mechanism fall back to a completion.
+    async fn warm_cache(&self, messages: &[ChatMessage]) -> anyhow::Result<()> {
+        self.chat_completion(messages).await?;
+        Ok(())
+    }
+
     /// Streaming variant. Invokes `on_chunk` with text fragments as they
     /// arrive; returns the full accumulated content on success. Default impl
     /// buffers (calls `chat_completion` and emits one chunk) so backends can
