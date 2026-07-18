@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
+    pub agent: AgentConfig,
     pub user: UserConfig,
     pub llm: LlmConfig,
     #[serde(default)]
@@ -18,6 +19,11 @@ pub struct AppConfig {
     pub firecrawl: Option<FirecrawlConfig>,
     pub camoufox: Option<CamoufoxConfig>,
     pub gmail: Option<GmailConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentConfig {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -233,6 +239,9 @@ pub fn load_config() -> Result<AppConfig> {
     })?;
     let mut config: AppConfig = toml::from_str(&content)
         .with_context(|| format!("Failed to parse config: {}", path.display()))?;
+    if config.agent.name.trim().is_empty() {
+        anyhow::bail!("[agent] name must not be empty in {}", path.display());
+    }
     warn_unknown_keys(&content);
     warn_config_footguns(&config);
     if let Ok(value) = std::env::var("OPENFERRIS_LLM_TEMPERATURE") {
@@ -254,6 +263,7 @@ pub fn load_config() -> Result<AppConfig> {
 /// cost of `deny_unknown_fields`.
 const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "user",
+    "agent",
     "llm",
     "daemon",
     "files",
@@ -307,12 +317,13 @@ pub fn load_user() -> String {
     }
 }
 
-pub fn load_soul() -> Result<String> {
+pub fn load_soul(agent_name: &str) -> Result<String> {
     let user_soul = config_dir().join("SOUL.md");
-    if user_soul.exists() {
+    let template = if user_soul.exists() {
         std::fs::read_to_string(&user_soul)
             .with_context(|| format!("Failed to read SOUL.md: {}", user_soul.display()))
     } else {
         Ok(include_str!("../SOUL.md").to_string())
-    }
+    }?;
+    Ok(template.replace("{{ agent.name }}", agent_name))
 }

@@ -13,12 +13,14 @@ use futures_util::stream;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixStream};
+use tokio::time::{Duration, Instant, interval};
 
 use openferris::protocol::{DaemonRequest, RequestKind, parse_goal_args};
 
 #[derive(Clone)]
 struct WebState {
     daemon_socket: String,
+    agent_name: String,
 }
 
 #[derive(Deserialize)]
@@ -26,7 +28,7 @@ struct ChatRequest {
     message: String,
 }
 
-pub async fn run(daemon_socket: String, listen: &str) -> Result<()> {
+pub async fn run(daemon_socket: String, listen: &str, agent_name: &str) -> Result<()> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("Failed to bind web chat to {listen}"))?;
@@ -36,7 +38,10 @@ pub async fn run(daemon_socket: String, listen: &str) -> Result<()> {
         .route("/app.js", get(js))
         .route("/api/health", get(health))
         .route("/api/chat", post(chat))
-        .with_state(WebState { daemon_socket });
+        .with_state(WebState {
+            daemon_socket,
+            agent_name: agent_name.to_string(),
+        });
 
     tracing::info!("OpenFerris web chat listening on http://{listen}");
     axum::serve(listener, app)
@@ -44,8 +49,17 @@ pub async fn run(daemon_socket: String, listen: &str) -> Result<()> {
         .context("Web server failed")
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("web/index.html"))
+async fn index(State(state): State<WebState>) -> Html<String> {
+    Html(include_str!("web/index.html").replace("{{AGENT_NAME}}", &html_escape(&state.agent_name)))
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 async fn css() -> impl IntoResponse {
@@ -123,17 +137,44 @@ async fn chat(State(state): State<WebState>, Json(input): Json<ChatRequest>) -> 
         return (StatusCode::BAD_GATEWAY, error.to_string()).into_response();
     }
 
-    let lines = stream::unfold(BufReader::new(reader), |mut reader| async move {
-        let mut line = String::new();
-        match reader.read_line(&mut line).await {
-            Ok(0) => None,
-            Ok(_) => Some((Ok::<Bytes, Infallible>(Bytes::from(line)), reader)),
-            Err(error) => {
-                tracing::warn!("Daemon stream ended with an error: {error}");
-                None
+    let mut heartbeat = interval(Duration::from_secs(5));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let stream_state = (
+        BufReader::new(reader),
+        heartbeat,
+        Instant::now(),
+        request.id,
+    );
+    let lines = stream::unfold(
+        stream_state,
+        |(mut reader, mut heartbeat, started, request_id)| async move {
+            let mut line = String::new();
+            tokio::select! {
+                result = reader.read_line(&mut line) => match result {
+                    Ok(0) => None,
+                    Ok(_) => Some((
+                        Ok::<Bytes, Infallible>(Bytes::from(line)),
+                        (reader, heartbeat, started, request_id),
+                    )),
+                    Err(error) => {
+                        tracing::warn!("Daemon stream ended with an error: {error}");
+                        None
+                    }
+                },
+                _ = heartbeat.tick() => {
+                    let seconds = started.elapsed().as_secs();
+                    let heartbeat_line = serde_json::json!({
+                        "request_id": request_id,
+                        "kind": { "Progress": { "text": format!("Thinking… {seconds}s") } }
+                    }).to_string() + "\n";
+                    Some((
+                        Ok::<Bytes, Infallible>(Bytes::from(heartbeat_line)),
+                        (reader, heartbeat, started, request_id),
+                    ))
+                }
             }
-        }
-    });
+        },
+    );
 
     Response::builder()
         .header(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8")
@@ -141,4 +182,14 @@ async fn chat(State(state): State<WebState>, Json(input): Json<ChatRequest>) -> 
         .header("X-Content-Type-Options", "nosniff")
         .body(Body::from_stream(lines))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_name_for_html_attribute() {
+        assert_eq!(html_escape("A&B\""), "A&amp;B&quot;");
+    }
 }

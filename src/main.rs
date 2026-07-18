@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Daemon => {
-            let soul = config::load_soul()?;
+            let soul = config::load_soul(&config.agent.name)?;
             let (agent, db_path, _skills_dir) = build_agent(&config, soul)?;
             let storage = storage::Storage::open(&db_path)?;
             tracing::info!("Storage opened at {}", db_path.display());
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
             tui::run(&config.daemon.socket).await?;
         }
         Commands::Web { listen } => {
-            web::run(config.daemon.socket.clone(), &listen).await?;
+            web::run(config.daemon.socket.clone(), &listen, &config.agent.name).await?;
         }
         Commands::Gmail => {
             let gmail_config = config.gmail.clone().ok_or_else(|| {
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::TestAgent { prompt, skill } => {
-            let soul = config::load_soul()?;
+            let soul = config::load_soul(&config.agent.name)?;
             let user_profile = config::load_user();
             let (agent, _db_path, skills_dir) = build_agent(&config, soul)?;
 

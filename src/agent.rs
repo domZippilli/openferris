@@ -71,7 +71,8 @@ impl Agent {
 
     /// Run the agent loop for a skill with a user message.
     /// `history` contains prior conversation messages (for TUI sessions).
-    /// `prompt.persistent_context` is loaded from storage (memories + recent interactions).
+    /// `prompt.persistent_context` contains memories and, for unthreaded
+    /// one-shot runs, the recent-interactions annex.
     pub async fn run(
         &self,
         skill: &Skill,
@@ -99,6 +100,12 @@ impl Agent {
             role: Role::User,
             content: user_message.to_string(),
         });
+
+        tracing::info!(
+            estimated_prompt_tokens = estimate_tokens(&messages),
+            history_messages = history.len(),
+            "Agent request assembled"
+        );
 
         // Discover the slot context window once per run (cached in the backend).
         let n_ctx = match self.llm.context_window_tokens().await {
@@ -176,9 +183,19 @@ impl Agent {
             let mut forwarded_up_to: usize = 0;
             let mut inside_tool_call = false;
             let progress_tx_ref = progress_tx.as_ref();
+            let inference_started = std::time::Instant::now();
+            let mut first_chunk_logged = false;
 
             let response = {
                 let mut on_chunk = |chunk: &str| {
+                    if !chunk.is_empty() && !first_chunk_logged {
+                        tracing::info!(
+                            iteration = iteration + 1,
+                            visible_chunk_ms = inference_started.elapsed().as_millis(),
+                            "First assistant chunk received"
+                        );
+                        first_chunk_logged = true;
+                    }
                     buffer.push_str(chunk);
                     // Repeatedly transition between outside/inside states until
                     // we can't make progress on the buffer suffix.

@@ -315,6 +315,9 @@ allowed_directories = ["~/notes", "~/documents"]
 ```toml
 # ~/.config/openferris/config.toml
 
+[agent]
+name = "Ferris"                    # Required; available as {{ agent.name }} in SOUL.md
+
 [user]
 timezone = "America/New_York"    # IANA timezone for datetime, set_wakeup, etc.
 emails = ["me@example.com"]       # Optional: your address(es), used to route inbound/outbound

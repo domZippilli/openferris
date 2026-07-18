@@ -25,18 +25,17 @@ struct QueuedRequest {
     progress_tx: mpsc::UnboundedSender<AgentNotification>,
 }
 
-/// Fraction of the model's context window the stored per-counterparty thread
-/// history is allowed to occupy. The rest is left for the system prompt,
-/// persistent context, the current turn, and tool round-trips (the agent
-/// still compacts in-run as a backstop). Half keeps a fresh turn comfortably
-/// within budget.
+/// Fraction of the model context available to history on smaller backends.
 const HISTORY_TOKEN_FRACTION: f32 = 0.5;
+/// Interactive chat should remain compact enough for fast cold prefill. Older
+/// durable facts belong in memories, not an indefinitely growing transcript.
+const MAX_HISTORY_TOKEN_BUDGET: usize = 16_000;
 /// Rough chars-per-token conversion, matching `agent::estimate_tokens`'s
 /// chars/4 heuristic — `Storage::load_thread` budgets in chars, not tokens,
 /// since it never tokenizes.
 const CHARS_PER_TOKEN_ESTIMATE: usize = 4;
 /// Fallback token budget when the backend's context window can't be queried.
-const DEFAULT_HISTORY_TOKEN_BUDGET: usize = 50_000;
+const DEFAULT_HISTORY_TOKEN_BUDGET: usize = MAX_HISTORY_TOKEN_BUDGET;
 const GOAL_SKILL_NAME: &str = "goal-pursuit";
 const GOAL_MAX_TURNS_HARD: usize = 25;
 
@@ -201,13 +200,18 @@ async fn run_with_wakeup_tick(
                 continue;
             }
 
-            // Sync: load persistent context from storage + memories
-            let interaction_context = match storage.build_context() {
-                Ok(ctx) => ctx,
-                Err(e) => {
-                    tracing::warn!("Failed to load interaction context: {}", e);
-                    String::new()
-                }
+            // Threaded interactive requests already have authoritative chat
+            // history. The cross-interface interaction annex is for one-shot
+            // runs that lack a thread; including it in interactive requests
+            // duplicates turns and invalidates the LLM prefix cache before
+            // the long history begins.
+            let counterparty: Option<String> = match &queued.request.kind {
+                RequestKind::FreeformMessage { .. } => queued
+                    .request
+                    .session_id
+                    .as_deref()
+                    .map(resolve_counterparty),
+                _ => None,
             };
 
             let memory_context = match memories.load_for_prompt() {
@@ -218,28 +222,28 @@ async fn run_with_wakeup_tick(
                 }
             };
 
+            let interaction_context = if counterparty.is_none() {
+                match storage.build_context() {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        tracing::warn!("Failed to load interaction context: {}", e);
+                        String::new()
+                    }
+                }
+            } else {
+                String::new()
+            };
+
             let persistent_context = format!("{}{}", memory_context, interaction_context);
 
             // Sync: load user profile (re-read each time so edits take effect)
             let user_profile = config::load_user();
 
-            // Conversation continuity: only freeform messages from an owner
-            // owner surface (web, TUI) thread together, keyed by the resolved
-            // counterparty rather than the raw session_id — so the same
-            // person is coherent across channels, and restarts don't wipe it.
-            let counterparty: Option<String> = match &queued.request.kind {
-                RequestKind::FreeformMessage { .. } => queued
-                    .request
-                    .session_id
-                    .as_deref()
-                    .map(resolve_counterparty),
-                _ => None,
-            };
-
             let history: Vec<ChatMessage> = match &counterparty {
                 Some(cp) => {
                     let token_budget = match worker_agent.context_window_tokens().await {
-                        Ok(n) => ((n as f32) * HISTORY_TOKEN_FRACTION) as usize,
+                        Ok(n) => (((n as f32) * HISTORY_TOKEN_FRACTION) as usize)
+                            .min(MAX_HISTORY_TOKEN_BUDGET),
                         Err(e) => {
                             tracing::warn!(
                                 "Could not size history budget: {}; using {}",
@@ -251,7 +255,15 @@ async fn run_with_wakeup_tick(
                     };
                     let char_budget = token_budget * CHARS_PER_TOKEN_ESTIMATE;
                     match storage.load_thread(cp, char_budget) {
-                        Ok(h) => h,
+                        Ok(h) => {
+                            tracing::debug!(
+                                counterparty = %cp,
+                                messages = h.len(),
+                                char_budget,
+                                "Loaded interactive thread history"
+                            );
+                            h
+                        }
                         Err(e) => {
                             tracing::warn!("Failed to load thread for {}: {}", cp, e);
                             Vec::new()
@@ -959,6 +971,9 @@ mod tests {
 
     fn minimal_config(socket: String) -> AppConfig {
         AppConfig {
+            agent: openferris::config::AgentConfig {
+                name: "Ferris".to_string(),
+            },
             user: UserConfig {
                 timezone: "UTC".to_string(),
                 emails: vec![],
