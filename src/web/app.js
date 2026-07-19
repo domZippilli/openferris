@@ -62,7 +62,6 @@ form.addEventListener('submit', async (event) => {
         if (payload.AssistantChunk) { streamed += payload.AssistantChunk.text; assistant.textContent = streamed; }
         if (payload.Done) assistant.textContent = payload.Done.text;
         if (payload.Error) throw new Error(payload.Error.message);
-        assistant.scrollIntoView({ behavior: 'smooth', block: 'end' });
       }
       if (done) break;
     }
