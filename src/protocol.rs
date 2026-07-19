@@ -17,6 +17,10 @@ pub struct DaemonRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestKind {
+    GetHistory {
+        channel: String,
+        limit: usize,
+    },
     RunSkill {
         skill_name: String,
         #[serde(default)]
@@ -34,6 +38,13 @@ pub enum RequestKind {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DisplayMessage {
+    pub role: String,
+    pub text: String,
+    pub timestamp: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DaemonResponse {
     pub request_id: String,
@@ -42,6 +53,9 @@ pub struct DaemonResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ResponseKind {
+    History {
+        messages: Vec<DisplayMessage>,
+    },
     Done {
         text: String,
     },

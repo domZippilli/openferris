@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 use crate::llm::{ChatMessage, Role};
+use crate::protocol::DisplayMessage;
 use crate::text::truncate_bytes;
 
 pub struct Storage {
@@ -229,6 +230,41 @@ impl Storage {
             rusqlite::params![now_local(), counterparty, channel, direction, kind, content],
         )?;
         Ok(())
+    }
+
+    /// Load a bounded, channel-specific transcript for display by a client.
+    /// Rows stay separate so the UI preserves original turn boundaries.
+    pub fn load_display_history(
+        &self,
+        counterparty: &str,
+        channel: &str,
+        limit: usize,
+    ) -> Result<Vec<DisplayMessage>> {
+        let limit = limit.clamp(1, 200) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT direction, content, ts FROM (
+                 SELECT id, direction, content, ts FROM messages
+                 WHERE counterparty = ?1 AND channel = ?2 AND kind = ?3
+                 ORDER BY ts DESC, id DESC LIMIT ?4
+             ) ORDER BY ts ASC, id ASC",
+        )?;
+        Ok(stmt
+            .query_map(
+                rusqlite::params![counterparty, channel, KIND_CHAT, limit],
+                |row| {
+                    let direction: String = row.get(0)?;
+                    Ok(DisplayMessage {
+                        role: if direction == DIRECTION_OUTBOUND {
+                            "assistant".to_string()
+                        } else {
+                            "user".to_string()
+                        },
+                        text: row.get(1)?,
+                        timestamp: row.get(2)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Load a counterparty's thread as `ChatMessage`s for the agent, oldest
@@ -485,6 +521,27 @@ mod tests {
         assert_eq!(thread[0].content, "Hi there");
         assert_eq!(thread[1].role, Role::Assistant);
         assert_eq!(thread[1].content, "Hello! How can I help?");
+    }
+
+    #[test]
+    fn test_display_history_filters_channel_and_preserves_turns() {
+        let storage = temp_storage();
+        storage
+            .append_message("owner", "web", DIRECTION_INBOUND, KIND_CHAT, "web one")
+            .unwrap();
+        storage
+            .append_message("owner", "tui", DIRECTION_INBOUND, KIND_CHAT, "tui hidden")
+            .unwrap();
+        storage
+            .append_message("owner", "web", DIRECTION_OUTBOUND, KIND_CHAT, "web two")
+            .unwrap();
+
+        let messages = storage.load_display_history("owner", "web", 50).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].text, "web one");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].text, "web two");
     }
 
     #[test]

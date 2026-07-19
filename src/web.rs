@@ -15,7 +15,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixStream};
 use tokio::time::{Duration, Instant, interval};
 
-use openferris::protocol::{DaemonRequest, RequestKind, parse_goal_args};
+use openferris::protocol::{
+    DaemonRequest, DaemonResponse, DisplayMessage, RequestKind, ResponseKind, parse_goal_args,
+};
 
 #[derive(Clone)]
 struct WebState {
@@ -37,6 +39,7 @@ pub async fn run(daemon_socket: String, listen: &str, agent_name: &str) -> Resul
         .route("/app.css", get(css))
         .route("/app.js", get(js))
         .route("/api/health", get(health))
+        .route("/api/history", get(history))
         .route("/api/chat", post(chat))
         .with_state(WebState {
             daemon_socket,
@@ -80,6 +83,48 @@ async fn health(State(state): State<WebState>) -> StatusCode {
     match UnixStream::connect(&state.daemon_socket).await {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+async fn history(State(state): State<WebState>) -> Response {
+    let request = DaemonRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: RequestKind::GetHistory {
+            channel: "web".to_string(),
+            limit: 50,
+        },
+        source: Some("web".to_string()),
+        session_id: None,
+    };
+    match fetch_history(&state.daemon_socket, &request).await {
+        Ok(messages) => Json(messages).into_response(),
+        Err(error) => {
+            tracing::warn!("Web chat could not load history: {error:#}");
+            (StatusCode::BAD_GATEWAY, "Could not load chat history").into_response()
+        }
+    }
+}
+
+async fn fetch_history(socket_path: &str, request: &DaemonRequest) -> Result<Vec<DisplayMessage>> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .context("Failed to connect to daemon")?;
+    let (reader, mut writer) = stream.into_split();
+    let mut encoded = serde_json::to_vec(request)?;
+    encoded.push(b'\n');
+    writer.write_all(&encoded).await?;
+
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    if line.is_empty() {
+        anyhow::bail!("Daemon disconnected while loading history");
+    }
+    let response: DaemonResponse = serde_json::from_str(line.trim())?;
+    match response.kind {
+        ResponseKind::History { messages } => Ok(messages),
+        ResponseKind::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("Daemon returned an unexpected history response"),
     }
 }
 

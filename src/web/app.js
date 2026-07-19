@@ -4,19 +4,35 @@ const messages = document.querySelector('#messages');
 const status = document.querySelector('#status');
 const button = form.querySelector('button');
 
-function addMessage(role, text = '') {
+function addMessage(role, text = '', scroll = true) {
   document.querySelector('.welcome')?.remove();
   const el = document.createElement('div');
   el.className = `message ${role}`;
   el.textContent = text;
   messages.append(el);
-  el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  if (scroll) el.scrollIntoView({ behavior: 'smooth', block: 'end' });
   return el;
 }
 
 async function checkHealth() {
   try { status.textContent = (await fetch('/api/health')).ok ? 'Assistant online' : 'Daemon offline'; }
   catch { status.textContent = 'Service offline'; }
+}
+
+async function loadHistory() {
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/history');
+    if (!response.ok) throw new Error(await response.text());
+    const history = await response.json();
+    for (const message of history) addMessage(message.role, message.text, false);
+    messages.lastElementChild?.scrollIntoView({ block: 'end' });
+  } catch (error) {
+    console.warn('Could not restore chat history:', error);
+  } finally {
+    button.disabled = false;
+    input.focus();
+  }
 }
 
 form.addEventListener('submit', async (event) => {
@@ -61,4 +77,4 @@ input.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); }
 });
 input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = `${input.scrollHeight}px`; });
-checkHealth(); input.focus();
+checkHealth(); loadHistory();

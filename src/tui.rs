@@ -132,6 +132,10 @@ pub async fn run(socket_path: &str) -> Result<()> {
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
+                ResponseKind::History { .. } => {
+                    eprintln!("Unexpected history response");
+                    break;
+                }
             }
         }
     }

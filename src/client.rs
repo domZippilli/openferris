@@ -72,6 +72,7 @@ pub async fn send_request(socket_path: &str, request: &DaemonRequest) -> Result<
             ResponseKind::Error { message } => anyhow::bail!("{}", message),
             ResponseKind::Progress { .. } => continue,
             ResponseKind::AssistantChunk { .. } => continue,
+            ResponseKind::History { .. } => anyhow::bail!("Unexpected history response"),
         }
     }
 }

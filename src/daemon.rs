@@ -214,6 +214,17 @@ async fn run_with_wakeup_tick(
         while let Some(queued) = rx.recv().await {
             let request_id = queued.request.id.clone();
 
+            if let RequestKind::GetHistory { ref channel, limit } = queued.request.kind {
+                let kind = match storage.load_display_history(counterparty::OWNER, channel, limit) {
+                    Ok(messages) => ResponseKind::History { messages },
+                    Err(error) => ResponseKind::Error {
+                        message: format!("Failed to load history: {error}"),
+                    },
+                };
+                let _ = queued.response_tx.send(DaemonResponse { request_id, kind });
+                continue;
+            }
+
             // Handle StoreMemory directly — no agent needed.
             if let RequestKind::StoreMemory { ref content } = queued.request.kind {
                 let response = match memories.add(content) {
@@ -408,6 +419,7 @@ async fn run_with_wakeup_tick(
                     // nothing to persist to a thread — don't panic the
                     // worker over it.
                     RequestKind::StoreMemory { .. } => {}
+                    RequestKind::GetHistory { .. } => unreachable!(),
                 }
             }
 
@@ -769,6 +781,7 @@ async fn process_request(
         }
         // StoreMemory is handled directly in the worker loop above.
         RequestKind::StoreMemory { .. } => unreachable!(),
+        RequestKind::GetHistory { .. } => unreachable!(),
     }
 }
 
