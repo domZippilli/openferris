@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use super::{Tool, require_str};
 use crate::agent::Agent;
 use crate::config::LlmConfig;
+use crate::llm::model_adapter::create_model_adapter;
 use crate::llm::openai_compat::OpenAiCompatBackend;
 use crate::skills;
 use crate::tools::ToolRegistry;
@@ -80,6 +81,7 @@ impl Tool for RunSkillTool {
             self.llm_config.top_k,
             self.llm_config.enable_thinking,
             1,
+            create_model_adapter(&self.llm_config.model_adapter)?,
         )?);
 
         // Build tool registry WITHOUT run_skill to prevent recursion

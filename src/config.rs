@@ -71,6 +71,9 @@ pub struct LlmConfig {
     pub backend: String,
     pub endpoint: String,
     pub model: Option<String>,
+    /// Translate OpenFerris messages and options into a model's request
+    /// dialect. Required so model-specific behavior is always explicit.
+    pub model_adapter: String,
     /// Sampling temperature sent with chat completion requests.
     #[serde(default = "default_temperature")]
     pub temperature: f32,
@@ -334,4 +337,30 @@ pub fn load_soul(agent_name: &str) -> Result<String> {
         Ok(include_str!("../SOUL.md").to_string())
     }?;
     Ok(template.replace("{{ agent.name }}", agent_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LlmConfig;
+
+    #[test]
+    fn llm_config_requires_model_adapter() {
+        let error =
+            toml::from_str::<LlmConfig>(r#"endpoint = "http://localhost:8080""#).unwrap_err();
+
+        assert!(error.to_string().contains("model_adapter"));
+    }
+
+    #[test]
+    fn llm_config_accepts_explicit_model_adapter() {
+        let config = toml::from_str::<LlmConfig>(
+            r#"
+                endpoint = "http://localhost:8080"
+                model_adapter = "generic"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.model_adapter, "generic");
+    }
 }

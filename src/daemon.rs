@@ -1040,6 +1040,7 @@ mod tests {
                 backend: "mock".to_string(),
                 endpoint: String::new(),
                 model: None,
+                model_adapter: "generic".to_string(),
                 temperature: 0.6,
                 top_k: 20,
                 enable_thinking: false,

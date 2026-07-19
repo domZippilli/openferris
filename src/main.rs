@@ -470,6 +470,8 @@ fn create_llm_backend(config: &config::AppConfig) -> anyhow::Result<Box<dyn llm:
             other
         ),
     }
+    let model_adapter = llm::model_adapter::create_model_adapter(&config.llm.model_adapter)?;
+    tracing::info!(model_adapter = model_adapter.name(), "Using model adapter");
     Ok(Box::new(llm::openai_compat::OpenAiCompatBackend::new(
         config.llm.endpoint.clone(),
         config.llm.model.clone(),
@@ -477,5 +479,6 @@ fn create_llm_backend(config: &config::AppConfig) -> anyhow::Result<Box<dyn llm:
         config.llm.top_k,
         config.llm.enable_thinking,
         0,
+        model_adapter,
     )?))
 }

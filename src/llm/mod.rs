@@ -1,4 +1,5 @@
 pub mod mock;
+pub mod model_adapter;
 pub mod openai_compat;
 
 use async_trait::async_trait;

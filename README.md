@@ -53,9 +53,10 @@ timezone = "America/New_York"
 [llm]
 backend = "openai_compat"
 endpoint = "http://localhost:8080"
+model_adapter = "generic"
 temperature = 0.6
 top_k = 20
-enable_thinking = true
+enable_thinking = false
 EOF
 ```
 
@@ -327,9 +328,10 @@ emails = ["me@example.com"]       # Optional: your address(es), used to route in
 backend = "openai_compat"        # LLM backend (openai_compat/openai-compatible/llamacpp all map to the same backend)
 endpoint = "http://localhost:8080"  # OpenAI-compatible server URL
 model = "my-model"                # Optional model name
+model_adapter = "generic"         # Required model request dialect: generic or gemma4
 temperature = 0.6                 # Sampling temperature
 top_k = 20                        # Sampling top-k
-enable_thinking = true            # Pass enable_thinking through chat_template_kwargs (vLLM/Gemma-style reasoning models)
+enable_thinking = false           # Gemma4 adapter: pass enable_thinking through chat_template_kwargs
 parallel_slots = 1                # >1 enables the run_skill subagent tool (parent uses slot 0, subagents use 1+)
 
 # Optional — omit the whole [daemon] table to use the default socket path.

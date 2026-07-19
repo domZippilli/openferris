@@ -3,8 +3,10 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tokio::sync::OnceCell;
 
+use super::model_adapter::{AdaptedMessage, GenerationOptions, ModelAdapter};
 use super::{ChatMessage, ChunkCallback, LlmBackend};
 
 /// Linear search for `needle` in `haystack`. Used to find the SSE message
@@ -25,6 +27,7 @@ pub struct OpenAiCompatBackend {
     top_k: u32,
     enable_thinking: bool,
     slot: i32,
+    model_adapter: Box<dyn ModelAdapter>,
     /// Per-slot context window discovered from the server's `/props` endpoint.
     /// Cached after first successful fetch; never refreshed within a process.
     n_ctx: OnceCell<usize>,
@@ -33,7 +36,7 @@ pub struct OpenAiCompatBackend {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: String,
-    messages: Vec<ApiMessage<'a>>,
+    messages: Vec<AdaptedMessage<'a>>,
     /// Pin to a specific llama.cpp slot for KV cache reuse across requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     id_slot: Option<i32>,
@@ -48,12 +51,7 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    chat_template_kwargs: Option<ChatTemplateKwargs>,
-}
-
-#[derive(Clone, Serialize)]
-struct ChatTemplateKwargs {
-    enable_thinking: bool,
+    chat_template_kwargs: Option<Map<String, Value>>,
 }
 
 #[derive(Deserialize)]
@@ -78,16 +76,6 @@ struct StreamDelta {
     reasoning: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
-}
-
-/// Borrows straight from the caller's `&[ChatMessage]` instead of cloning
-/// every message's full content on every request — serde serializes borrowed
-/// `&str` fields the same as owned `String`s, so this is a pure allocation
-/// saving with no wire-format change.
-#[derive(Serialize)]
-struct ApiMessage<'a> {
-    role: &'a str,
-    content: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -123,6 +111,7 @@ impl OpenAiCompatBackend {
         top_k: u32,
         enable_thinking: bool,
         slot: i32,
+        model_adapter: Box<dyn ModelAdapter>,
     ) -> Result<Self> {
         // Use a total `timeout` rather than a `read_timeout`: even in the
         // streaming path, the server can go silent on the wire for a while
@@ -146,13 +135,8 @@ impl OpenAiCompatBackend {
             top_k,
             enable_thinking,
             slot,
+            model_adapter,
             n_ctx: OnceCell::new(),
-        })
-    }
-
-    fn chat_template_kwargs(&self) -> Option<ChatTemplateKwargs> {
-        self.enable_thinking.then_some(ChatTemplateKwargs {
-            enable_thinking: true,
         })
     }
 
@@ -165,25 +149,24 @@ impl OpenAiCompatBackend {
         messages: &'a [ChatMessage],
         stream: bool,
         max_tokens: Option<i32>,
-    ) -> ChatRequest<'a> {
-        let api_messages: Vec<ApiMessage<'a>> = messages
-            .iter()
-            .map(|m| ApiMessage {
-                role: m.role.as_str(),
-                content: m.content.as_str(),
-            })
-            .collect();
+    ) -> Result<ChatRequest<'a>> {
+        let adapted = self.model_adapter.adapt(
+            messages,
+            GenerationOptions {
+                enable_thinking: self.enable_thinking,
+            },
+        )?;
 
-        ChatRequest {
+        Ok(ChatRequest {
             model: self.model.clone().unwrap_or_else(|| "default".to_string()),
-            messages: api_messages,
+            messages: adapted.messages,
             id_slot: Some(self.slot),
             max_tokens,
             temperature: self.temperature,
             top_k: self.top_k,
             stream,
-            chat_template_kwargs: self.chat_template_kwargs(),
-        }
+            chat_template_kwargs: adapted.chat_template_kwargs,
+        })
     }
 
     /// POST a built `ChatRequest` to the chat completions endpoint and return
@@ -256,7 +239,7 @@ struct ModelEntry {
 #[async_trait]
 impl LlmBackend for OpenAiCompatBackend {
     async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
-        let request = self.build_request(messages, false, None);
+        let request = self.build_request(messages, false, None)?;
         let response = self.post_chat(&request).await?;
 
         let chat_response: ChatResponse = response
@@ -290,7 +273,7 @@ impl LlmBackend for OpenAiCompatBackend {
         messages: &[ChatMessage],
         on_chunk: ChunkCallback<'_>,
     ) -> Result<String> {
-        let request = self.build_request(messages, true, None);
+        let request = self.build_request(messages, true, None)?;
         let response = self.post_chat(&request).await?;
 
         let mut stream = response.bytes_stream();
@@ -383,7 +366,7 @@ impl LlmBackend for OpenAiCompatBackend {
     }
 
     async fn warm_cache(&self, messages: &[ChatMessage]) -> Result<()> {
-        let request = self.build_request(messages, false, Some(1));
+        let request = self.build_request(messages, false, Some(1))?;
         let response = self.post_chat(&request).await?;
         // A one-token reasoning completion may legitimately carry
         // `content: null`. The output is intentionally discarded; consuming
